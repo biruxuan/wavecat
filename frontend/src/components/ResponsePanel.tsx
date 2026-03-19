@@ -3,13 +3,21 @@ import type { Frame, SessionSummary } from "../types";
 type Props = {
   frame?: Frame;
   sessionSummary?: SessionSummary;
+  liveText?: string;
 };
 
-export function ResponsePanel({ frame, sessionSummary }: Props) {
+export function ResponsePanel({ frame, sessionSummary, liveText }: Props) {
   return (
     <section className="panel response-panel">
       <div className="panel-title">Response Body</div>
-      {!frame && !sessionSummary ? <div className="placeholder">No inbound response yet.</div> : null}
+      {!frame && !sessionSummary && !liveText ? <div className="placeholder">No inbound response yet.</div> : null}
+
+      {liveText ? (
+        <div className="live-text-block">
+          <div className="live-text-label">Assistant Response</div>
+          <pre className="live-text">{liveText}</pre>
+        </div>
+      ) : null}
 
       {sessionSummary ? (
         <>

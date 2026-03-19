@@ -3,6 +3,7 @@ package frame
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,8 @@ import (
 	"wavecat/internal/model"
 )
 
-const maxPayloadPreviewBytes = 4096
+const maxBinaryPayloadPreviewBytes = 4096
+const maxTextPayloadBytes = 262144
 
 type Store struct {
 	mu      sync.RWMutex
@@ -79,18 +81,23 @@ func BuildEventFrame(summary string, errMsg string) model.FrameDTO {
 
 func BuildTextFrame(direction string, text string) model.FrameDTO {
 	originalSize := len([]byte(text))
-	preview, truncated := truncateString(text, maxPayloadPreviewBytes)
+	preview, truncated := truncateString(text, maxTextPayloadBytes)
 
 	summaryPrefix := "Text"
 	prettyText := preview
+	semantic := ""
 	if prettyJSON, ok := tryPrettyJSON(preview); ok {
 		summaryPrefix = "JSON"
 		prettyText = prettyJSON
+		semantic = extractJSONSemantic(text)
 	}
 
 	summary := fmt.Sprintf("%s %d bytes", summaryPrefix, originalSize)
+	if semantic != "" {
+		summary = fmt.Sprintf("%s %s %d bytes", summaryPrefix, semantic, originalSize)
+	}
 	if truncated {
-		summary = fmt.Sprintf("%s (preview %d bytes)", summary, maxPayloadPreviewBytes)
+		summary = fmt.Sprintf("%s (preview %d bytes)", summary, maxTextPayloadBytes)
 	}
 
 	return model.FrameDTO{
@@ -104,15 +111,18 @@ func BuildTextFrame(direction string, text string) model.FrameDTO {
 
 func BuildBinaryFrame(direction string, payload []byte) model.FrameDTO {
 	originalSize := len(payload)
-	preview, truncated := truncateBytes(payload, maxPayloadPreviewBytes)
+	preview, truncated := truncateBytes(payload, maxBinaryPayloadPreviewBytes)
 
 	hexText := strings.ToUpper(hex.EncodeToString(preview))
 	spacedHex := splitEvery(hexText, 2)
 	asciiText := toASCII(preview)
 
 	summary := fmt.Sprintf("Binary %d bytes", originalSize)
+	if desc, ok := describeGatewayBinary(payload); ok {
+		summary = fmt.Sprintf("%s (%d bytes)", desc, originalSize)
+	}
 	if truncated {
-		summary = fmt.Sprintf("%s (preview %d bytes)", summary, maxPayloadPreviewBytes)
+		summary = fmt.Sprintf("%s (preview %d bytes)", summary, maxBinaryPayloadPreviewBytes)
 	}
 
 	return model.FrameDTO{
@@ -158,6 +168,78 @@ func tryPrettyJSON(text string) (string, bool) {
 	}
 
 	return buf.String(), true
+}
+
+func extractJSONSemantic(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+
+	var parsed struct {
+		Type    string `json:"type"`
+		Event   string `json:"event"`
+		Payload struct {
+			Role        string `json:"role"`
+			ContentType string `json:"content_type"`
+		} `json:"payload"`
+	}
+
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if parsed.Type != "" || parsed.Event != "" {
+		parts = append(parts, strings.ToLower(strings.TrimSpace(parsed.Type))+"/"+strings.ToLower(strings.TrimSpace(parsed.Event)))
+	}
+	if parsed.Payload.Role != "" || parsed.Payload.ContentType != "" {
+		parts = append(parts, strings.ToLower(strings.TrimSpace(parsed.Payload.Role))+"/"+strings.ToLower(strings.TrimSpace(parsed.Payload.ContentType)))
+	}
+
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(part, "/")
+		if part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+
+	if len(cleaned) == 0 {
+		return ""
+	}
+
+	return strings.Join(cleaned, " ")
+}
+
+func describeGatewayBinary(payload []byte) (string, bool) {
+	if len(payload) < 12 {
+		return "", false
+	}
+
+	magic := binary.BigEndian.Uint16(payload[0:2])
+	if magic != 0xAA55 {
+		return "", false
+	}
+
+	flags := payload[3]
+	streamID := binary.BigEndian.Uint16(payload[4:6])
+	seq := binary.BigEndian.Uint32(payload[6:10])
+	payloadLen := binary.BigEndian.Uint16(payload[10:12])
+
+	flagName := "AUDIO_UNKNOWN"
+	switch flags {
+	case 0x01:
+		flagName = "AUDIO_START"
+	case 0x02:
+		flagName = "AUDIO_CHUNK"
+	case 0x03:
+		flagName = "AUDIO_END"
+	case 0x04:
+		flagName = "AUDIO_STOP"
+	}
+
+	return fmt.Sprintf("Gateway %s sid=%d seq=%d payload=%d", flagName, streamID, seq, payloadLen), true
 }
 
 func splitEvery(text string, step int) string {

@@ -5,10 +5,12 @@ import { FrameDetail } from "./components/FrameDetail";
 import { FrameList } from "./components/FrameList";
 import { ResponsePanel } from "./components/ResponsePanel";
 import { SendPanel } from "./components/SendPanel";
+import { RealTimePCMPlayer, type PCMChunkDiagnostics } from "./services/pcmPlayer";
 import {
     wsClearFrames,
     wsConnect,
     wsDisconnect,
+    wsInspectAudioFile,
     wsGetFrames,
     wsPCMStreamStatus,
     wsPing,
@@ -20,10 +22,49 @@ import {
     wsStartPCMStream,
     wsStopPCMStream,
     wsStatus,
+        wsSavePCMBytes,
 } from "./services/api";
-import type { AudioStreamStatus, Frame, SessionProfileType, SessionSummary } from "./types";
+import type { AudioFileInfo, AudioHeaderFieldRule, AudioStreamStatus, Frame, SessionProfileType, SessionSummary } from "./types";
 
 function App() {
+    const miniTranslationHeaderPreset = [
+        { name: "magic", type: "uint16", length: 2, endian: "big", defaultValue: "43605", rule: "default" },
+        { name: "version", type: "uint8", length: 1, endian: "big", defaultValue: "1", rule: "default" },
+        { name: "chunk_type", type: "uint8", length: 1, endian: "big", defaultValue: "2", rule: "default" },
+        { name: "stream_id", type: "uint16", length: 2, endian: "big", defaultValue: "21", rule: "default" },
+        { name: "seq", type: "uint32", length: 4, endian: "big", defaultValue: "0", rule: "seq" },
+        { name: "payload_len", type: "uint16", length: 2, endian: "big", defaultValue: "0", rule: "payload_len" },
+    ];
+    type SessionRunConfig = {
+        profileType: SessionProfileType;
+        filePath: string;
+        sampleRate: number;
+        channels: number;
+        bitDepth: number;
+        frameMs: number;
+        seqStart: number;
+        headerRules: AudioHeaderFieldRule[];
+    };
+
+    type LastDraftConfig = {
+        url: string;
+        headersText: string;
+        queryParamsText: string;
+        subprotocol: string;
+        textPayload: string;
+        binaryPayload: string;
+        binaryFilePath: string;
+        pcmFilePath: string;
+        sampleRate: number;
+        channels: number;
+        bitDepth: number;
+        frameMs: number;
+        seqStart: number;
+        translationFromLanguage: string;
+        translationToLanguagesText: string;
+        sessionProfile: SessionProfileType;
+    };
+
     const [url, setUrl] = useState("ws://127.0.0.1:8080/ws");
     const [headersText, setHeadersText] = useState("{}");
     const [queryParamsText, setQueryParamsText] = useState("{}");
@@ -44,14 +85,15 @@ function App() {
     const [bitDepth, setBitDepth] = useState(16);
     const [frameMs, setFrameMs] = useState(20);
     const [seqStart, setSeqStart] = useState(0);
+    const [translationFromLanguage, setTranslationFromLanguage] = useState("zh-CN");
+    const [translationToLanguagesText, setTranslationToLanguagesText] = useState("en-US");
+    const [audioParamSource, setAudioParamSource] = useState("Mini Translation preset");
+    const [headerConfigSource, setHeaderConfigSource] = useState("Mini Translation preset");
     const [jsonVariableContext, setJSONVariableContext] = useState({
         conversationId: "",
         streamId: 21,
     });
-    const [headerRules, setHeaderRules] = useState([
-        { name: "seq", type: "uint16", length: 2, endian: "big", defaultValue: "0", rule: "seq" },
-        { name: "payload_len", type: "uint16", length: 2, endian: "big", defaultValue: "0", rule: "payload_len" },
-    ]);
+    const [headerRules, setHeaderRules] = useState(miniTranslationHeaderPreset);
     const [headerTemplates, setHeaderTemplates] = useState<
         Array<{ name: string; seqStart: number; headerRules: typeof headerRules }>
     >([]);
@@ -67,6 +109,34 @@ function App() {
         lastError: "",
         finishReason: "",
     });
+    const [audioFileInfo, setAudioFileInfo] = useState<AudioFileInfo | undefined>(undefined);
+    const [connectionPanelCollapsed, setConnectionPanelCollapsed] = useState(false);
+    const [scrollExpandPreset, setScrollExpandPreset] = useState<"sensitive" | "stable">("sensitive");
+    const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
+    const [serverPCMSampleRate, setServerPCMSampleRate] = useState(16000);
+    const [serverPCMChannels, setServerPCMChannels] = useState(1);
+    const [serverPCMMaxScheduledSources, setServerPCMMaxScheduledSources] = useState(2);
+    const [serverPCMMinStartBufferMs, setServerPCMMinStartBufferMs] = useState(120);
+    const [serverPCMPlaying, setServerPCMPlaying] = useState(false);
+    const [serverPCMPlayedChunks, setServerPCMPlayedChunks] = useState(0);
+    const [audioProbe, setAudioProbe] = useState({
+        scanned: 0,
+        matched: 0,
+        failed: 0,
+        skipped: 0,
+        queueLength: 0,
+        scheduledSources: 0,
+        lastReason: "",
+        lastOperationId: "",
+        lastDurationMs: 0,
+        lastBytes: 0,
+        lastRms: 0,
+        lastPeak: 0,
+        lastBoundaryJump: 0,
+        lastSmoothingMs: 0,
+    });
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    const [probeDetailsOpen, setProbeDetailsOpen] = useState(false);
     const [savedConnections, setSavedConnections] = useState<
         Array<{ name: string; url: string; headersText: string; queryParamsText: string; subprotocol: string }>
     >([]);
@@ -87,6 +157,71 @@ function App() {
     const formatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const sessionRunnerRef = useRef(false);
     const sessionStatusRef = useRef("");
+    const settingsRef = useRef<HTMLDivElement | null>(null);
+    const [liveAssistantText, setLiveAssistantText] = useState("");
+    const pcmPlayerRef = useRef<RealTimePCMPlayer | null>(null);
+    const logSessionStartRef = useRef<number | null>(null);
+    const pcmRecordingRef = useRef<Uint8Array[] | null>(null);
+    const [pcmRecording, setPcmRecording] = useState(false);
+    const [chunkLog, setChunkLog] = useState<Array<{
+        t: number; rms: number; peak: number; jump: number; bytes: number; dur: number;
+    }>>([]);
+    const lastPlayedInboundFrameIdRef = useRef(0);
+    const lastProcessedTextFrameIdRef = useRef(0);
+    const playbackPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const streamedAudioOperationIdsRef = useRef<Set<string>>(new Set());
+
+    const cloneMiniTranslationHeaderPreset = () =>
+        miniTranslationHeaderPreset.map((rule) => ({ ...rule }));
+
+    const normalizeLanguageTag = (raw: string) => {
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            return "";
+        }
+        const parts = trimmed.split("-").filter(Boolean);
+        if (parts.length === 0) {
+            return "";
+        }
+        return parts
+            .map((part, index) => {
+                if (index === 0) {
+                    return part.toLowerCase();
+                }
+                if (part.length === 2 || part.length === 3) {
+                    return part.toUpperCase();
+                }
+                return part;
+            })
+            .join("-");
+    };
+
+    const parseTranslationToLanguages = (raw: string) => {
+        const normalized = raw
+            .split(/[\s,|]+/)
+            .map((item) => normalizeLanguageTag(item))
+            .filter(Boolean);
+        return Array.from(new Set(normalized));
+    };
+
+    const buildTranslationStartTemplate = (fromLanguageRaw = translationFromLanguage, toLanguagesRaw = translationToLanguagesText) => {
+        const fromLanguage = normalizeLanguageTag(fromLanguageRaw) || "zh-CN";
+        const toLanguages = parseTranslationToLanguages(toLanguagesRaw);
+        const normalizedTargets = toLanguages.length > 0 ? toLanguages : ["en-US"];
+        return `{
+  "message_id": "${"${message_id}"}",
+  "operation_id": "${"${operation_id}"}",
+  "conversation_id": "${"${conversation_id}"}",
+  "stream_id": ${"${stream_id}"},
+  "type": "translation",
+  "event": "start",
+  "payload": {
+    "from_language": "${fromLanguage}",
+    "to_languages": ${JSON.stringify(normalizedTargets)}
+  },
+  "created_at": ${"${created_at}"}
+}`;
+    };
 
     const updateStatus = (message: string) => {
         lastStatusRef.current = message;
@@ -115,6 +250,340 @@ function App() {
         }, 5000);
     };
 
+    const extractPCMBase64FromInboundFrame = (frame: Frame) => {
+        if (frame.direction !== "in") {
+            return { chunk: "", reason: "not_inbound" };
+        }
+        const rawText = frame.text?.trim();
+        if (!rawText) {
+            return { chunk: "", reason: "empty_text" };
+        }
+        try {
+            const parsed = JSON.parse(rawText) as {
+                operation_id?: unknown;
+                type?: unknown;
+                event?: unknown;
+                payload?: {
+                    role?: unknown;
+                    content_type?: unknown;
+                    delta?: unknown;
+                    audio?: unknown;
+                };
+            };
+
+            // 协议要求：以 type / event / role / content_type 做业务判断，source_type 仅为诊断字段禁止用于主流程
+            const msgType = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+            if (msgType !== "chat") {
+                return { chunk: "", reason: "not_chat" };
+            }
+
+            const eventName = typeof parsed.event === "string" ? parsed.event.trim().toLowerCase() : "";
+            const operationId = typeof parsed.operation_id === "string" ? parsed.operation_id.trim() : "";
+            const role = typeof parsed.payload?.role === "string" ? parsed.payload.role.trim().toLowerCase() : "";
+            const contentType =
+                typeof parsed.payload?.content_type === "string" ? parsed.payload.content_type.trim().toLowerCase() : "";
+
+            const isBase64Like = (value: string) =>
+                /^[A-Za-z0-9+/=\s]+$/.test(value) && value.replace(/\s/g, "").length >= 8;
+
+            const isSemanticAssistantAudio = contentType === "audio" && (role === "assistant" || role === "");
+
+            // event=interim → payload.delta 为 Base64 PCM S16LE 分片
+            if (eventName === "interim") {
+                const delta = parsed.payload?.delta;
+                if (isSemanticAssistantAudio && typeof delta === "string" && isBase64Like(delta)) {
+                    if (role === "assistant") {
+                        return { chunk: delta, reason: "matched_interim_delta", operationId, eventName };
+                    }
+                    return { chunk: delta, reason: "matched_interim_delta_no_role", operationId, eventName };
+                }
+                if (isSemanticAssistantAudio) {
+                    return { chunk: "", reason: "invalid_interim_delta", operationId, eventName };
+                }
+                return {
+                    chunk: "",
+                    reason: `not_assistant_audio(${eventName || "unknown"}/${role || "none"}/${contentType || "none"})`,
+                    operationId,
+                    eventName,
+                };
+            }
+
+            // event=result → payload.audio 为完整音频 Base64
+            if (eventName === "result") {
+                const audio = parsed.payload?.audio;
+                if (isSemanticAssistantAudio && typeof audio === "string" && audio.trim().length === 0) {
+                    return { chunk: "", reason: "skip_empty_result_audio", operationId, eventName };
+                }
+                if (isSemanticAssistantAudio && typeof audio === "string" && isBase64Like(audio)) {
+                    if (operationId && streamedAudioOperationIdsRef.current.has(operationId)) {
+                        return { chunk: "", reason: "skip_duplicate_result_audio_after_interim", operationId, eventName };
+                    }
+                    if (role === "assistant") {
+                        return { chunk: audio, reason: "matched_result_audio", operationId, eventName };
+                    }
+                    return { chunk: audio, reason: "matched_result_audio_no_role", operationId, eventName };
+                }
+                if (isSemanticAssistantAudio) {
+                    return { chunk: "", reason: "invalid_result_audio", operationId, eventName };
+                }
+                return {
+                    chunk: "",
+                    reason: `not_assistant_audio(${eventName || "unknown"}/${role || "none"}/${contentType || "none"})`,
+                    operationId,
+                    eventName,
+                };
+            }
+
+            return {
+                chunk: "",
+                reason: `event_ignored(${eventName || "unknown"}/${role || "none"}/${contentType || "none"})`,
+                operationId,
+                eventName,
+            };
+        } catch {
+            return { chunk: "", reason: "json_parse_error", operationId: "", eventName: "" };
+        }
+    };
+
+    const processInboundTextChunks = (nextFrames: Frame[]) => {
+        const newFrames = nextFrames.filter(
+            (f) => f.direction === "in" && f.id > lastProcessedTextFrameIdRef.current
+        );
+        if (newFrames.length === 0) return;
+
+        let lastId = lastProcessedTextFrameIdRef.current;
+        let appendText = "";
+        let resultContent = "";
+        let hadResult = false;
+        let isNewTurn = false;
+
+        for (const frame of newFrames) {
+            lastId = Math.max(lastId, frame.id);
+            const raw = frame.text?.trim();
+            if (!raw) continue;
+            try {
+                const parsed = JSON.parse(raw) as {
+                    type?: unknown;
+                    event?: unknown;
+                    payload?: {
+                        role?: unknown;
+                        content_type?: unknown;
+                        delta?: unknown;
+                        content?: unknown;
+                        accepted?: unknown;
+                    };
+                };
+
+                if (parsed.type === "chat") {
+                    const event = typeof parsed.event === "string" ? parsed.event : "";
+                    const role = typeof parsed.payload?.role === "string" ? parsed.payload.role : "";
+                    const contentType = typeof parsed.payload?.content_type === "string" ? parsed.payload.content_type : "";
+
+                    // event=accepted signals start of a new reply turn — reset accumulated text
+                    if (event === "accepted") {
+                        isNewTurn = true;
+                        appendText = "";
+                        resultContent = "";
+                        hadResult = false;
+                    }
+
+                    if (role === "assistant" && contentType === "text") {
+                        if (event === "interim") {
+                            const delta = parsed.payload?.delta;
+                            if (typeof delta === "string" && delta) {
+                                appendText += delta;
+                            }
+                        } else if (event === "result") {
+                            const content = parsed.payload?.content;
+                            if (typeof content === "string" && content) {
+                                hadResult = true;
+                                resultContent = content;
+                            }
+                        }
+                    }
+                } else if (parsed.type === "translation") {
+                    const event = typeof parsed.event === "string" ? parsed.event : "";
+                    if (event === "interim" || event === "result") {
+                        const extracted = extractTranslationText(raw);
+                        if (extracted) {
+                            if (event === "result") {
+                                hadResult = true;
+                                resultContent = extracted;
+                            } else {
+                                appendText = extracted; // replace with latest interim (not cumulative)
+                            }
+                        }
+                    }
+                }
+            } catch {
+                // ignore parse errors
+            }
+        }
+
+        lastProcessedTextFrameIdRef.current = lastId;
+
+        if (hadResult) {
+            setLiveAssistantText(resultContent);
+        } else if (isNewTurn) {
+            setLiveAssistantText(appendText);
+        } else if (appendText) {
+            setLiveAssistantText((prev) => prev + appendText);
+        }
+    };
+
+    const createPCMPlayer = (): RealTimePCMPlayer => {
+        const player = new RealTimePCMPlayer();
+        player.setMaxScheduledSources(serverPCMMaxScheduledSources);
+        player.setMinStartBufferedMs(serverPCMMinStartBufferMs);
+        player.onRawBytes = (bytes) => {
+            if (pcmRecordingRef.current) {
+                pcmRecordingRef.current.push(bytes);
+            }
+        };
+        player.onChunkPlaying = (diag) => {
+            setAudioProbe((prev) => ({
+                ...prev,
+                lastBytes: diag.bytes,
+                lastDurationMs: diag.durationMs,
+                lastRms: diag.rms,
+                lastPeak: diag.peak,
+                lastBoundaryJump: diag.boundaryJump,
+                lastSmoothingMs: diag.smoothingMs,
+            }));
+            const now = Date.now();
+            if (logSessionStartRef.current === null) {
+                logSessionStartRef.current = now;
+            }
+            const t = now - logSessionStartRef.current;
+            const entry = { t, rms: diag.rms, peak: diag.peak, jump: diag.boundaryJump, bytes: diag.bytes, dur: diag.durationMs };
+            setChunkLog((prev) => {
+                const next = [...prev, entry];
+                return next.length > 60 ? next.slice(next.length - 60) : next;
+            });
+        };
+        return player;
+    };
+
+    useEffect(() => {
+        if (pcmPlayerRef.current) {
+            pcmPlayerRef.current.setMaxScheduledSources(serverPCMMaxScheduledSources);
+            pcmPlayerRef.current.setMinStartBufferedMs(serverPCMMinStartBufferMs);
+        }
+    }, [serverPCMMaxScheduledSources, serverPCMMinStartBufferMs]);
+
+    const handleToggleAutoPlayServerPCM = async (nextEnabled: boolean) => {
+        setAutoPlayServerPCM(nextEnabled);
+        if (!nextEnabled) {
+            return;
+        }
+        if (!pcmPlayerRef.current) {
+            pcmPlayerRef.current = createPCMPlayer();
+        }
+        try {
+            await pcmPlayerRef.current.unlock();
+        } catch {
+            updateStatus("audio playback may be blocked by system policy; click speaker again after interaction");
+        }
+    };
+
+    const playInboundAudioChunks = async (nextFrames: Frame[]) => {
+        const newInboundFrames = nextFrames
+            .filter((frame) => frame.direction === "in" && frame.id > lastPlayedInboundFrameIdRef.current)
+            .sort((a, b) => a.id - b.id);
+
+        if (newInboundFrames.length === 0) {
+            return;
+        }
+
+        if (!autoPlayServerPCM) {
+            lastPlayedInboundFrameIdRef.current = newInboundFrames[newInboundFrames.length - 1].id;
+            setServerPCMPlaying(false);
+            return;
+        }
+
+        if (!pcmPlayerRef.current) {
+            pcmPlayerRef.current = createPCMPlayer();
+        }
+
+        let lastProcessedId = lastPlayedInboundFrameIdRef.current;
+        let playedChunks = 0;
+        let probeScanned = 0;
+        let probeMatched = 0;
+        let probeFailed = 0;
+        let probeSkipped = 0;
+        let lastReason = "";
+        let lastOperationId = "";
+        let lastDiagnostics: PCMChunkDiagnostics | null = null;
+        const isProbeCandidateReason = (reason: string) => {
+            return (
+                reason.startsWith("matched_") ||
+                reason.startsWith("invalid_interim_delta") ||
+                reason.startsWith("invalid_result_audio") ||
+                reason.startsWith("skip_empty_result_audio") ||
+                reason.startsWith("skip_duplicate_result_audio_after_interim") ||
+                reason.startsWith("not_assistant_audio(interim") ||
+                reason.startsWith("not_assistant_audio(result")
+            );
+        };
+        for (const frame of newInboundFrames) {
+            lastProcessedId = frame.id;
+            const extracted = extractPCMBase64FromInboundFrame(frame);
+            lastReason = extracted.reason;
+            lastOperationId = extracted.operationId ?? "";
+            if (isProbeCandidateReason(extracted.reason)) {
+                probeScanned += 1;
+            }
+            if (extracted.reason.startsWith("skip_")) {
+                probeSkipped += 1;
+            }
+            const chunk = extracted.chunk;
+            if (!chunk) {
+                continue;
+            }
+            probeMatched += 1;
+            try {
+                lastDiagnostics = await pcmPlayerRef.current.enqueuePCM16Base64(chunk, serverPCMSampleRate, serverPCMChannels);
+                if (extracted.eventName === "interim" && extracted.operationId) {
+                    streamedAudioOperationIdsRef.current.add(extracted.operationId);
+                }
+                playedChunks += 1;
+            } catch {
+                // ignore single chunk decode/playback errors
+                probeFailed += 1;
+            }
+        }
+        lastPlayedInboundFrameIdRef.current = lastProcessedId;
+        if (probeScanned > 0) {
+            const playbackState = pcmPlayerRef.current?.getPlaybackState();
+            setAudioProbe((prev) => ({
+                scanned: prev.scanned + probeScanned,
+                matched: prev.matched + probeMatched,
+                failed: prev.failed + probeFailed,
+                skipped: prev.skipped + probeSkipped,
+                queueLength: playbackState?.queueLength ?? prev.queueLength,
+                scheduledSources: playbackState?.scheduledSources ?? prev.scheduledSources,
+                lastReason,
+                lastOperationId,
+                lastDurationMs: lastDiagnostics?.durationMs ?? prev.lastDurationMs,
+                lastBytes: lastDiagnostics?.bytes ?? prev.lastBytes,
+                lastRms: lastDiagnostics?.rms ?? prev.lastRms,
+                lastPeak: lastDiagnostics?.peak ?? prev.lastPeak,
+                lastBoundaryJump: lastDiagnostics?.boundaryJump ?? prev.lastBoundaryJump,
+                lastSmoothingMs: lastDiagnostics?.smoothingMs ?? prev.lastSmoothingMs,
+            }));
+        }
+        if (playedChunks > 0) {
+            setServerPCMPlayedChunks((prev) => prev + playedChunks);
+            setServerPCMPlaying(true);
+            if (playbackPulseTimerRef.current) {
+                clearTimeout(playbackPulseTimerRef.current);
+            }
+            playbackPulseTimerRef.current = setTimeout(() => {
+                setServerPCMPlaying(false);
+            }, 900);
+        }
+    };
+
     useEffect(() => {
         try {
             const raw = window.localStorage.getItem("wavecat.savedConnections");
@@ -131,6 +600,29 @@ function App() {
                 }
             }
 
+            const rawDraft = window.localStorage.getItem("wavecat.lastDraftConfig");
+            if (rawDraft) {
+                const draft = JSON.parse(rawDraft) as Partial<LastDraftConfig>;
+                if (typeof draft.url === "string") setUrl(draft.url);
+                if (typeof draft.headersText === "string") setHeadersText(draft.headersText);
+                if (typeof draft.queryParamsText === "string") setQueryParamsText(draft.queryParamsText);
+                if (typeof draft.subprotocol === "string") setSubprotocol(draft.subprotocol);
+                if (typeof draft.textPayload === "string") setTextPayload(draft.textPayload);
+                if (typeof draft.binaryPayload === "string") setBinaryPayload(draft.binaryPayload);
+                if (typeof draft.binaryFilePath === "string") setBinaryFilePath(draft.binaryFilePath);
+                if (typeof draft.pcmFilePath === "string") setPcmFilePath(draft.pcmFilePath);
+                if (typeof draft.sampleRate === "number" && Number.isFinite(draft.sampleRate)) setSampleRate(draft.sampleRate);
+                if (typeof draft.channels === "number" && Number.isFinite(draft.channels)) setChannels(draft.channels);
+                if (typeof draft.bitDepth === "number" && Number.isFinite(draft.bitDepth)) setBitDepth(draft.bitDepth);
+                if (typeof draft.frameMs === "number" && Number.isFinite(draft.frameMs)) setFrameMs(draft.frameMs);
+                if (typeof draft.seqStart === "number" && Number.isFinite(draft.seqStart)) setSeqStart(draft.seqStart);
+                if (typeof draft.translationFromLanguage === "string") setTranslationFromLanguage(draft.translationFromLanguage);
+                if (typeof draft.translationToLanguagesText === "string") setTranslationToLanguagesText(draft.translationToLanguagesText);
+                if (draft.sessionProfile === "chat" || draft.sessionProfile === "translation") {
+                    setSessionProfile(draft.sessionProfile);
+                }
+            }
+
             const rawTemplates = window.localStorage.getItem("wavecat.headerTemplates");
             if (rawTemplates) {
                 const parsedTemplates = JSON.parse(rawTemplates) as Array<{
@@ -141,6 +633,38 @@ function App() {
                 if (Array.isArray(parsedTemplates)) {
                     setHeaderTemplates(parsedTemplates);
                 }
+            }
+
+            const rawScrollPreset = window.localStorage.getItem("wavecat.scrollExpandPreset");
+            if (rawScrollPreset === "sensitive" || rawScrollPreset === "stable") {
+                setScrollExpandPreset(rawScrollPreset);
+            }
+
+            const rawAutoPlayServerPCM = window.localStorage.getItem("wavecat.autoPlayServerPCM");
+            if (rawAutoPlayServerPCM === "true" || rawAutoPlayServerPCM === "false") {
+                setAutoPlayServerPCM(rawAutoPlayServerPCM === "true");
+            }
+
+            const rawServerPCMSampleRate = Number(window.localStorage.getItem("wavecat.serverPCMSampleRate"));
+            if (Number.isFinite(rawServerPCMSampleRate) && rawServerPCMSampleRate >= 8000 && rawServerPCMSampleRate <= 96000) {
+                setServerPCMSampleRate(rawServerPCMSampleRate);
+            }
+
+            const rawServerPCMChannels = Number(window.localStorage.getItem("wavecat.serverPCMChannels"));
+            if (rawServerPCMChannels === 1 || rawServerPCMChannels === 2) {
+                setServerPCMChannels(rawServerPCMChannels);
+            }
+
+            const rawServerPCMMaxScheduledSources = Number(window.localStorage.getItem("wavecat.serverPCMMaxScheduledSources"));
+            if (Number.isFinite(rawServerPCMMaxScheduledSources)) {
+                const normalized = Math.max(1, Math.min(10, Math.floor(rawServerPCMMaxScheduledSources)));
+                setServerPCMMaxScheduledSources(normalized);
+            }
+
+            const rawServerPCMMinStartBufferMs = Number(window.localStorage.getItem("wavecat.serverPCMMinStartBufferMs"));
+            if (Number.isFinite(rawServerPCMMinStartBufferMs)) {
+                const normalized = Math.max(40, Math.min(400, Math.floor(rawServerPCMMinStartBufferMs)));
+                setServerPCMMinStartBufferMs(normalized);
             }
         } catch {
             // ignore localStorage parse errors
@@ -165,6 +689,14 @@ function App() {
 
                 setStreamStatus(nextStreamStatus);
                 setStreaming(nextStreamStatus.running);
+                if (pcmPlayerRef.current) {
+                    const playbackState = pcmPlayerRef.current.getPlaybackState();
+                    setAudioProbe((prev) => ({
+                        ...prev,
+                        queueLength: playbackState.queueLength,
+                        scheduledSources: playbackState.scheduledSources,
+                    }));
+                }
 
                 setConnected((prev) => {
                     const next = nextStatus.state === "connected";
@@ -183,8 +715,10 @@ function App() {
                 if (lastFrameSigRef.current !== frameSig) {
                     lastFrameSigRef.current = frameSig;
                     setFrames(nextFrames);
+                    await playInboundAudioChunks(nextFrames);
+                    processInboundTextChunks(nextFrames);
                     if (last?.id) {
-                        setSelectedId(last.id);
+                        setSelectedId((prev) => prev ?? last.id);
                     }
 
                     if (pendingResponseRef.current) {
@@ -211,6 +745,125 @@ function App() {
             clearPendingResponse();
         };
     }, []);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.scrollExpandPreset", scrollExpandPreset);
+    }, [scrollExpandPreset]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.autoPlayServerPCM", String(autoPlayServerPCM));
+    }, [autoPlayServerPCM]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMSampleRate", String(serverPCMSampleRate));
+    }, [serverPCMSampleRate]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMChannels", String(serverPCMChannels));
+    }, [serverPCMChannels]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMMaxScheduledSources", String(serverPCMMaxScheduledSources));
+    }, [serverPCMMaxScheduledSources]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMMinStartBufferMs", String(serverPCMMinStartBufferMs));
+    }, [serverPCMMinStartBufferMs]);
+
+    useEffect(() => {
+        const draft: LastDraftConfig = {
+            url,
+            headersText,
+            queryParamsText,
+            subprotocol,
+            textPayload,
+            binaryPayload,
+            binaryFilePath,
+            pcmFilePath,
+            sampleRate,
+            channels,
+            bitDepth,
+            frameMs,
+            seqStart,
+            translationFromLanguage,
+            translationToLanguagesText,
+            sessionProfile,
+        };
+        window.localStorage.setItem("wavecat.lastDraftConfig", JSON.stringify(draft));
+    }, [
+        url,
+        headersText,
+        queryParamsText,
+        subprotocol,
+        textPayload,
+        binaryPayload,
+        binaryFilePath,
+        pcmFilePath,
+        sampleRate,
+        channels,
+        bitDepth,
+        frameMs,
+        seqStart,
+        translationFromLanguage,
+        translationToLanguagesText,
+        sessionProfile,
+    ]);
+
+    useEffect(() => {
+        if (autoPlayServerPCM) {
+            return;
+        }
+        setServerPCMPlaying(false);
+    }, [autoPlayServerPCM]);
+
+    useEffect(() => {
+        if (!autoPlayServerPCM) {
+            return;
+        }
+
+        const tryUnlock = async () => {
+            if (!pcmPlayerRef.current) {
+                pcmPlayerRef.current = createPCMPlayer();
+            }
+            try {
+                await pcmPlayerRef.current.unlock();
+            } catch {
+                // 自动播放策略可能阻止，等待后续用户交互再次尝试
+            }
+        };
+
+        const onGesture = () => {
+            void tryUnlock();
+        };
+
+        document.addEventListener("pointerdown", onGesture);
+        document.addEventListener("keydown", onGesture);
+        return () => {
+            document.removeEventListener("pointerdown", onGesture);
+            document.removeEventListener("keydown", onGesture);
+        };
+    }, [autoPlayServerPCM]);
+
+    useEffect(() => {
+        if (!settingsOpen && !probeDetailsOpen) {
+            return;
+        }
+
+        const handlePointerDown = (event: PointerEvent) => {
+            const root = settingsRef.current;
+            const target = event.target as Node | null;
+            if (!root || !target || root.contains(target)) {
+                return;
+            }
+            setSettingsOpen(false);
+            setProbeDetailsOpen(false);
+        };
+
+        document.addEventListener("pointerdown", handlePointerDown);
+        return () => {
+            document.removeEventListener("pointerdown", handlePointerDown);
+        };
+    }, [settingsOpen, probeDetailsOpen]);
 
     useEffect(() => {
         if (formatTimerRef.current) {
@@ -327,6 +980,11 @@ function App() {
         clearPendingResponse();
         updateStatus(result.message);
         setStreaming(false);
+        lastPlayedInboundFrameIdRef.current = 0;
+        lastProcessedTextFrameIdRef.current = 0;
+        setLiveAssistantText("");
+        streamedAudioOperationIdsRef.current.clear();
+        setAudioProbe({ scanned: 0, matched: 0, failed: 0, skipped: 0, queueLength: 0, scheduledSources: 0, lastReason: "", lastOperationId: "", lastDurationMs: 0, lastBytes: 0, lastRms: 0, lastPeak: 0, lastBoundaryJump: 0, lastSmoothingMs: 0 });
     };
 
     const handlePing = async () => {
@@ -337,6 +995,11 @@ function App() {
     const handleClear = async () => {
         await wsClearFrames();
         setSelectedId(null);
+        lastPlayedInboundFrameIdRef.current = 0;
+        lastProcessedTextFrameIdRef.current = 0;
+        setLiveAssistantText("");
+        streamedAudioOperationIdsRef.current.clear();
+        setAudioProbe({ scanned: 0, matched: 0, failed: 0, skipped: 0, queueLength: 0, scheduledSources: 0, lastReason: "", lastOperationId: "", lastDurationMs: 0, lastBytes: 0, lastRms: 0, lastPeak: 0, lastBoundaryJump: 0, lastSmoothingMs: 0 });
     };
 
     const applyJSONVariables = (raw: string) => {
@@ -357,7 +1020,7 @@ function App() {
 
     const handleApplyJSONTemplate = (template: string) => {
         if (template === "translation_start") {
-            setTextPayload(`{\n  "message_id": "${"${message_id}"}",\n  "operation_id": "${"${operation_id}"}",\n  "conversation_id": "${"${conversation_id}"}",\n  "stream_id": ${"${stream_id}"},\n  "type": "translation",\n  "event": "start",\n  "payload": {\n    "from_language": "zh-CN",\n    "to_languages": ["en"]\n  },\n  "created_at": ${"${created_at}"}\n}`);
+            setTextPayload(buildTranslationStartTemplate());
             return;
         }
         if (template === "translation_close") {
@@ -365,7 +1028,7 @@ function App() {
             return;
         }
         if (template === "chat_start") {
-            setTextPayload(`{\n  "message_id": "${"${message_id}"}",\n  "conversation_id": "${"${conversation_id}"}",\n  "stream_id": ${"${stream_id}"},\n  "type": "chat",\n  "event": "start",\n  "payload": {\n    "instructions": "你是简洁可靠的中文语音助手，优先直接回答用户问题。"\n  },\n  "created_at": ${"${created_at}"}\n}`);
+            setTextPayload(`{\n  "message_id": "${"${message_id}"}",\n  "conversation_id": "${"${conversation_id}"}",\n  "stream_id": ${"${stream_id}"},\n  "type": "chat",\n  "event": "start",\n  "payload": {\n    "instructions": "你是简洁可靠的中文语音助手，优先直接回答用户问题。",\n    "output_mode": "text_audio"\n  },\n  "created_at": ${"${created_at}"}\n}`);
             return;
         }
         if (template === "chat_close") {
@@ -426,7 +1089,8 @@ function App() {
 
     const handleStartStream = async () => {
         try {
-            const result = await wsStartPCMStream({
+            const resolvedConfig = await resolveAudioRunConfig({
+                profileType: sessionProfile,
                 filePath: pcmFilePath.trim(),
                 sampleRate,
                 channels,
@@ -435,13 +1099,22 @@ function App() {
                 seqStart,
                 headerRules,
             });
+            const result = await wsStartPCMStream({
+                filePath: resolvedConfig.filePath,
+                sampleRate: resolvedConfig.sampleRate,
+                channels: resolvedConfig.channels,
+                bitDepth: resolvedConfig.bitDepth,
+                frameMs: resolvedConfig.frameMs,
+                seqStart: resolvedConfig.seqStart,
+                headerRules: resolvedConfig.headerRules,
+            });
             updateStatus(result.message);
             setStreaming(result.success);
             setStreamStatus({
                 running: result.success,
-                filePath: pcmFilePath.trim(),
+                filePath: resolvedConfig.filePath,
                 frameBytes: 0,
-                frameMs,
+                frameMs: resolvedConfig.frameMs,
                 sentFrames: 0,
                 sentBytes: 0,
                 lastError: "",
@@ -459,7 +1132,7 @@ function App() {
             const result = await wsPickPCMFile();
             if (result.success && result.path) {
                 setPcmFilePath(result.path);
-                updateStatus("pcm file selected");
+                await inspectAudioFile(result.path, true);
                 return;
             }
             updateStatus(result.message);
@@ -483,12 +1156,88 @@ function App() {
         updateStatus("header template saved");
     };
 
+    const handleApplyMiniTranslationPreset = () => {
+        setSampleRate(16000);
+        setChannels(1);
+        setBitDepth(16);
+        setFrameMs(20);
+        setSeqStart(1);
+        setAudioParamSource("Mini Translation preset");
+        setHeaderConfigSource("Mini Translation preset");
+        setHeaderRules(cloneMiniTranslationHeaderPreset());
+        updateStatus("mini translation preset applied");
+    };
+
+    const inspectAudioFile = async (filePath: string, shouldUpdateStatus: boolean) => {
+        const info = await wsInspectAudioFile(filePath.trim());
+        setAudioFileInfo(info);
+        if (!info.success) {
+            throw new Error(info.message || "inspect audio file failed");
+        }
+        if (info.format === "wav") {
+            if (info.sampleRate > 0) {
+                setSampleRate(info.sampleRate);
+            }
+            if (info.channels > 0) {
+                setChannels(info.channels);
+            }
+            if (info.bitDepth > 0) {
+                setBitDepth(info.bitDepth);
+            }
+            setAudioParamSource("WAV auto-detected");
+            if (shouldUpdateStatus) {
+                updateStatus(`wav detected: ${info.sampleRate}Hz / ${info.channels}ch / ${info.bitDepth}bit`);
+            }
+            return info;
+        }
+        setAudioParamSource("Manual");
+        if (shouldUpdateStatus) {
+            updateStatus(info.message || "audio file selected");
+        }
+        return info;
+    };
+
+    const resolveAudioRunConfig = async (config: SessionRunConfig): Promise<SessionRunConfig> => {
+        const resolved = {
+            ...config,
+            filePath: config.filePath.trim(),
+            headerRules: config.headerRules.map((rule) => ({ ...rule })),
+        };
+        if (!resolved.filePath) {
+            throw new Error("audio file path 不能为空");
+        }
+        if (!resolved.filePath.toLowerCase().endsWith(".wav")) {
+            return resolved;
+        }
+        const info = await inspectAudioFile(resolved.filePath, false);
+        return {
+            ...resolved,
+            sampleRate: info.sampleRate > 0 ? info.sampleRate : resolved.sampleRate,
+            channels: info.channels > 0 ? info.channels : resolved.channels,
+            bitDepth: info.bitDepth > 0 ? info.bitDepth : resolved.bitDepth,
+        };
+    };
+
+    const applyMiniTranslationState = () => {
+        setSessionProfile("translation");
+        setSampleRate(16000);
+        setChannels(1);
+        setBitDepth(16);
+        setFrameMs(20);
+        setSeqStart(1);
+        setAudioParamSource("Mini Translation preset");
+        setHeaderConfigSource("Mini Translation preset");
+        setHeaderRules(cloneMiniTranslationHeaderPreset());
+        setTextPayload(buildSessionTemplate("translation", "start"));
+    };
+
     const handleLoadHeaderTemplate = (index: number) => {
         const template = headerTemplates[index];
         if (!template) {
             return;
         }
         setSeqStart(template.seqStart ?? 0);
+        setHeaderConfigSource(`Saved template: ${template.name}`);
         setHeaderRules(template.headerRules ?? []);
         updateStatus(`header template loaded: ${template.name}`);
     };
@@ -526,7 +1275,8 @@ function App() {
     const waitForInboundEvent = async (
         matcher: (text: string) => boolean,
         timeoutMs: number,
-        afterId = 0
+        afterId = 0,
+        onPoll?: (frames: Frame[]) => void
     ) => {
         const startedAt = Date.now();
         while (Date.now() - startedAt < timeoutMs) {
@@ -545,6 +1295,7 @@ function App() {
             if (last?.id) {
                 setSelectedId(last.id);
             }
+            onPoll?.(nextFrames);
             if (matched) {
                 setSelectedId(matched.id);
                 return matched;
@@ -618,7 +1369,7 @@ function App() {
             const parsed = JSON.parse(text) as {
                 type?: unknown;
                 event?: unknown;
-                payload?: { event?: unknown; status?: unknown; source_type?: unknown };
+                payload?: { event?: unknown; status?: unknown };
                 status?: unknown;
             };
             if (parsed.type !== "chat") {
@@ -695,31 +1446,7 @@ function App() {
         if (profileType === "translation") {
             return isTranslationEvent(text, eventNames);
         }
-        try {
-            const parsed = JSON.parse(text) as {
-                type?: unknown;
-                event?: unknown;
-                payload?: { event?: unknown; status?: unknown };
-                status?: unknown;
-            };
-            if (parsed.type !== "chat") {
-                return false;
-            }
-            const candidates = [parsed.event, parsed.status, parsed.payload?.event, parsed.payload?.status]
-                .filter((value): value is string => typeof value === "string")
-                .map((value) => value.toLowerCase());
-            return eventNames.some((name) => candidates.includes(name.toLowerCase()));
-        } catch {
-            const normalized = text.replaceAll(" ", "").toLowerCase();
-            return (
-                normalized.includes('"type":"chat"') &&
-                eventNames.some(
-                    (name) =>
-                        normalized.includes(`"event":"${name.toLowerCase()}"`) ||
-                        normalized.includes(`"status":"${name.toLowerCase()}"`)
-                )
-            );
-        }
+        return isChatEvent(text, eventNames);
     };
 
     const isTranslationFinalFrame = (text: string) => {
@@ -750,17 +1477,38 @@ function App() {
             const parsed = JSON.parse(text) as {
                 type?: unknown;
                 event?: unknown;
-                payload?: { source_type?: unknown; delta?: unknown };
+                payload?: { role?: unknown; content_type?: unknown; delta?: unknown };
             };
             return (
                 parsed.type === "chat" &&
                 parsed.event === "interim" &&
-                parsed.payload?.source_type === "response.audio.delta" &&
+                parsed.payload?.content_type === "audio" &&
+                (parsed.payload?.role === "assistant" || parsed.payload?.role === undefined || parsed.payload?.role === null || parsed.payload?.role === "") &&
                 typeof parsed.payload?.delta === "string" &&
                 parsed.payload.delta.length > 0
             );
         } catch {
             return false;
+        }
+    };
+
+    const isChatFinalFrame = (text: string) => {
+        try {
+            const parsed = JSON.parse(text) as {
+                type?: unknown;
+                event?: unknown;
+                status?: unknown;
+            };
+            if (parsed.type !== "chat") {
+                return false;
+            }
+            const eventStr = typeof parsed.event === "string" ? parsed.event.toLowerCase() : "";
+            if (["result", "completed", "final", "finished"].includes(eventStr)) {
+                return true;
+            }
+            return false;
+        } catch {
+            return isChatEvent(text, ["result", "completed", "final", "finished"]);
         }
     };
 
@@ -783,7 +1531,8 @@ function App() {
   "type": "chat",
   "event": "start",
   "payload": {
-    "instructions": "你是简洁可靠的中文语音助手，优先直接回答用户问题。"
+        "instructions": "你是简洁可靠的中文语音助手，优先直接回答用户问题。",
+        "output_mode": "text_audio"
   },
   "created_at": ${"${created_at}"}
 }`;
@@ -799,19 +1548,7 @@ function App() {
 }`;
         }
         if (phase === "start") {
-            return `{
-  "message_id": "${"${message_id}"}",
-  "operation_id": "${"${operation_id}"}",
-  "conversation_id": "${"${conversation_id}"}",
-  "stream_id": ${"${stream_id}"},
-  "type": "translation",
-  "event": "start",
-  "payload": {
-    "from_language": "zh-CN",
-    "to_languages": ["en"]
-  },
-  "created_at": ${"${created_at}"}
-}`;
+            return buildTranslationStartTemplate();
         }
         return `{
   "message_id": "${"${message_id}"}",
@@ -825,14 +1562,15 @@ function App() {
 }`;
     };
 
-    const handleRunSession = async () => {
+    const runSessionFlow = async (baseConfig: SessionRunConfig) => {
         if (sessionRunnerRef.current) {
             return;
         }
+        const sessionConfig = await resolveAudioRunConfig(baseConfig);
         sessionRunnerRef.current = true;
         sessionStatusRef.current = "";
         setSessionSummary({
-            profileType: sessionProfile,
+            profileType: sessionConfig.profileType,
             status: "starting",
             extractedText: "",
             extractedAudioChunks: 0,
@@ -847,7 +1585,7 @@ function App() {
             const startSnapshot = await wsGetFrames();
             const startAfterId = startSnapshot[startSnapshot.length - 1]?.id ?? 0;
 
-            const startTemplate = buildSessionTemplate(sessionProfile, "start");
+            const startTemplate = buildSessionTemplate(sessionConfig.profileType, "start");
             const injectedStartPayload = applyJSONVariables(startTemplate);
             const startPayload = tryFormatJSON(injectedStartPayload) ?? injectedStartPayload;
             setTextPayload(startPayload);
@@ -856,9 +1594,9 @@ function App() {
                 throw new Error(startResult.message);
             }
 
-            updateStatus(`waiting ${sessionProfile}/started...`);
+            updateStatus(`waiting ${sessionConfig.profileType}/started...`);
             setSessionSummary({
-                profileType: sessionProfile,
+                profileType: sessionConfig.profileType,
                 status: "waiting_started",
                 extractedText: "",
                 extractedAudioChunks: 0,
@@ -866,26 +1604,26 @@ function App() {
                 error: "",
             });
             const startedFrame = await waitForInboundEvent(
-                (text) => matchesSessionEvent(text, sessionProfile, ["started"]),
+                (text) => matchesSessionEvent(text, sessionConfig.profileType, ["started"]),
                 15000,
                 startAfterId
             );
 
             const streamStartResult = await wsStartPCMStream({
-                filePath: pcmFilePath.trim(),
-                sampleRate,
-                channels,
-                bitDepth,
-                frameMs,
-                seqStart,
-                headerRules,
+                filePath: sessionConfig.filePath,
+                sampleRate: sessionConfig.sampleRate,
+                channels: sessionConfig.channels,
+                bitDepth: sessionConfig.bitDepth,
+                frameMs: sessionConfig.frameMs,
+                seqStart: sessionConfig.seqStart,
+                headerRules: sessionConfig.headerRules,
             });
             if (!streamStartResult.success) {
                 throw new Error(streamStartResult.message);
             }
             setStreaming(true);
             setSessionSummary({
-                profileType: sessionProfile,
+                profileType: sessionConfig.profileType,
                 status: "streaming",
                 startedFrame,
                 extractedText: "",
@@ -900,11 +1638,11 @@ function App() {
                 throw new Error(finishedStreamStatus.lastError);
             }
 
-            updateStatus(`waiting ${sessionProfile} final/completed...`);
+            updateStatus(`waiting ${sessionConfig.profileType} final/completed...`);
             let extractedAudioChunks = 0;
             let extractedAudioBytes = 0;
             setSessionSummary({
-                profileType: sessionProfile,
+                profileType: sessionConfig.profileType,
                 status: "waiting_final",
                 startedFrame,
                 extractedText: "",
@@ -912,37 +1650,53 @@ function App() {
                 extractedAudioBytes: 0,
                 error: "",
             });
-            const finalFrame = await waitForInboundEvent(
-                (text) => {
-                    if (sessionProfile === "translation") {
-                        return isTranslationFinalFrame(text);
-                    }
-                    return matchesSessionEvent(text, sessionProfile, ["result", "completed", "final", "finished"]);
-                },
-                30000,
-                startedFrame.id
-            );
-            const extractedText = finalFrame.text ? extractTranslationText(finalFrame.text) : "";
-
-            if (sessionProfile === "chat") {
-                const snapshotFrames = await wsGetFrames();
-                const inboundFrames = snapshotFrames.filter(
-                    (frame) => frame.direction === "in" && frame.id >= startedFrame.id && typeof frame.text === "string"
+            const countAudioDeltas = (polledFrames: Frame[]) => {
+                const audioDeltas = polledFrames.filter(
+                    (f) => f.direction === "in" && f.id >= startedFrame.id && isChatAudioDeltaFrame(f.text ?? "")
                 );
-                const audioDeltaFrames = inboundFrames.filter((frame) => isChatAudioDeltaFrame(frame.text ?? ""));
-                extractedAudioChunks = audioDeltaFrames.length;
-                extractedAudioBytes = audioDeltaFrames.reduce((sum, frame) => {
+                const chunks = audioDeltas.length;
+                const bytes = audioDeltas.reduce((sum, f) => {
                     try {
-                        const parsed = JSON.parse(frame.text ?? "") as { payload?: { delta?: unknown } };
-                        return sum + (typeof parsed.payload?.delta === "string" ? estimateBase64DecodedBytes(parsed.payload.delta) : 0);
+                        const p = JSON.parse(f.text ?? "") as { payload?: { delta?: unknown } };
+                        return sum + (typeof p.payload?.delta === "string" ? estimateBase64DecodedBytes(p.payload.delta) : 0);
                     } catch {
                         return sum;
                     }
                 }, 0);
+                return { chunks, bytes };
+            };
+
+            const finalFrame = await waitForInboundEvent(
+                (text) => {
+                    if (sessionConfig.profileType === "translation") {
+                        return isTranslationFinalFrame(text);
+                    }
+                    return isChatFinalFrame(text);
+                },
+                30000,
+                startedFrame.id,
+                sessionConfig.profileType === "chat"
+                    ? (polledFrames) => {
+                          const { chunks, bytes } = countAudioDeltas(polledFrames);
+                          setSessionSummary((prev) => ({
+                              ...prev,
+                              extractedAudioChunks: chunks,
+                              extractedAudioBytes: bytes,
+                          }));
+                      }
+                    : undefined
+            );
+            const extractedText = finalFrame.text ? extractTranslationText(finalFrame.text) : "";
+
+            if (sessionConfig.profileType === "chat") {
+                const snapshotFrames = await wsGetFrames();
+                const { chunks, bytes } = countAudioDeltas(snapshotFrames);
+                extractedAudioChunks = chunks;
+                extractedAudioBytes = bytes;
             }
 
             setSessionSummary({
-                profileType: sessionProfile,
+                profileType: sessionConfig.profileType,
                 status: "final_received",
                 startedFrame,
                 finalFrame,
@@ -954,7 +1708,7 @@ function App() {
 
             const closeSnapshot = await wsGetFrames();
             const closeAfterId = closeSnapshot[closeSnapshot.length - 1]?.id ?? 0;
-            const closeTemplate = buildSessionTemplate(sessionProfile, "close");
+            const closeTemplate = buildSessionTemplate(sessionConfig.profileType, "close");
             const injectedClosePayload = applyJSONVariables(closeTemplate);
             const closePayload = tryFormatJSON(injectedClosePayload) ?? injectedClosePayload;
             const closeResult = await wsSendText(closePayload);
@@ -962,9 +1716,9 @@ function App() {
                 throw new Error(closeResult.message);
             }
 
-            updateStatus(`waiting ${sessionProfile}/session_finished...`);
+            updateStatus(`waiting ${sessionConfig.profileType}/session_finished...`);
             setSessionSummary({
-                profileType: sessionProfile,
+                profileType: sessionConfig.profileType,
                 status: "closing",
                 startedFrame,
                 finalFrame,
@@ -974,13 +1728,13 @@ function App() {
                 error: "",
             });
             const sessionFinishedFrame = await waitForInboundEvent(
-                (text) => matchesSessionEvent(text, sessionProfile, ["session_finished", "closed", "close_session_ack"]),
+                (text) => matchesSessionEvent(text, sessionConfig.profileType, ["session_finished", "closed", "close_session_ack"]),
                 15000,
                 closeAfterId
             );
 
             setSessionSummary({
-                profileType: sessionProfile,
+                profileType: sessionConfig.profileType,
                 status: "completed",
                 startedFrame,
                 finalFrame,
@@ -990,7 +1744,7 @@ function App() {
                 extractedAudioBytes,
                 error: "",
             });
-            updateStatus(`${sessionProfile} session completed`);
+            updateStatus(`${sessionConfig.profileType} session completed`);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             setSessionSummary((prev) => ({
@@ -1012,6 +1766,33 @@ function App() {
             sessionRunnerRef.current = false;
             sessionStatusRef.current = "";
         }
+    };
+
+    const handleRunSession = async () => {
+        await runSessionFlow({
+            profileType: sessionProfile,
+            filePath: pcmFilePath,
+            sampleRate,
+            channels,
+            bitDepth,
+            frameMs,
+            seqStart,
+            headerRules,
+        });
+    };
+
+    const handleRunMiniTranslation = async () => {
+        applyMiniTranslationState();
+        await runSessionFlow({
+            profileType: "translation",
+            filePath: pcmFilePath,
+            sampleRate: 16000,
+            channels: 1,
+            bitDepth: 16,
+            frameMs: 20,
+            seqStart: 1,
+            headerRules: cloneMiniTranslationHeaderPreset(),
+        });
     };
 
     const handleStopStream = async () => {
@@ -1038,91 +1819,405 @@ function App() {
 
         try {
             const parsed = JSON.parse(trimmed) as unknown;
-            return JSON.stringify(parsed, null, 2);
+            return JSON.stringify(parsed, null, "\t");
         } catch {
             return null;
         }
     };
 
+        const audioProbeMiniClass = !autoPlayServerPCM
+                ? "off"
+                : audioProbe.scanned === 0
+                    ? "idle"
+                    : audioProbe.matched === 0
+                        ? "bad"
+                        : audioProbe.failed > 0
+                            ? "warn"
+                            : "good";
+
     return (
         <div id="app" className="layout">
-            <header className="app-header">WaveCat - AI Voice WebSocket Debugger (MVP)</header>
-            <ConnectionPanel
-                url={url}
-                headersText={headersText}
-                queryParamsText={queryParamsText}
-                subprotocol={subprotocol}
-                connected={connected}
-                statusText={statusText}
-                savedConnections={savedConnections}
-                onUrlChange={setUrl}
-                onHeadersChange={setHeadersText}
-                onQueryParamsChange={setQueryParamsText}
-                onSubprotocolChange={setSubprotocol}
-                onConnect={handleConnect}
-                onReconnect={handleReconnect}
-                onDisconnect={handleDisconnect}
-                onPing={handlePing}
-                onUseSavedConnection={handleUseSavedConnection}
-                onSaveCurrentConnection={handleSaveCurrentConnection}
-            />
-            <div className="main-grid">
-                <FrameList
-                    frames={frames}
-                    selectedId={selectedId}
-                    searchText={searchText}
-                    directionFilter={directionFilter}
-                    typeFilter={typeFilter}
-                    onSelect={setSelectedId}
-                    onClear={handleClear}
-                    onSearchTextChange={setSearchText}
-                    onDirectionFilterChange={setDirectionFilter}
-                    onTypeFilterChange={setTypeFilter}
-                />
-                <FrameDetail frame={selectedFrame} />
+            <header className="app-header">
+                <div className="app-title">WaveCat - AI Voice WebSocket Debugger (MVP)</div>
+                <div className="header-settings" ref={settingsRef}>
+                    <button
+                        type="button"
+                        className={`speaker-indicator speaker-toggle-button ${!autoPlayServerPCM ? "off" : serverPCMPlaying ? "playing" : "idle"}`}
+                        onClick={() => {
+                            void handleToggleAutoPlayServerPCM(!autoPlayServerPCM);
+                        }}
+                        title={autoPlayServerPCM ? "Click to mute realtime playback" : "Click to enable realtime playback"}
+                        aria-label={autoPlayServerPCM ? "Mute realtime playback" : "Enable realtime playback"}
+                    >
+                        <span className="speaker-dot" />
+                        <span>
+                            🔊 {autoPlayServerPCM ? (serverPCMPlaying ? "playing" : "idle") : "off"}
+                            {autoPlayServerPCM ? ` · ${serverPCMPlayedChunks} chunks` : ""}
+                        </span>
+                    </button>
+                    <button
+                        type="button"
+                        className={`audio-probe-mini ${audioProbeMiniClass}`}
+                        title={`Audio probe · scanned=${audioProbe.scanned}, matched=${audioProbe.matched}, failed=${audioProbe.failed}, skipped=${audioProbe.skipped}, queue=${audioProbe.queueLength}, scheduled=${audioProbe.scheduledSources}, op=${audioProbe.lastOperationId || "-"}, durationMs=${audioProbe.lastDurationMs.toFixed(1)}, rms=${audioProbe.lastRms.toFixed(4)}, peak=${audioProbe.lastPeak.toFixed(4)}, jump=${audioProbe.lastBoundaryJump.toFixed(4)}, smoothingMs=${audioProbe.lastSmoothingMs.toFixed(1)}, reason=${audioProbe.lastReason || "-"}`}
+                        onClick={() => setProbeDetailsOpen((prev) => !prev)}
+                    >
+                        probe {audioProbe.matched}/{audioProbe.scanned}
+                        {audioProbe.queueLength > 0 || audioProbe.scheduledSources > 0 ? ` · q ${audioProbe.queueLength}/${audioProbe.scheduledSources}` : ""}
+                        {audioProbe.skipped > 0 ? ` · skip ${audioProbe.skipped}` : ""}
+                        {audioProbe.failed > 0 ? ` · fail ${audioProbe.failed}` : ""}
+                    </button>
+                    {probeDetailsOpen ? (
+                        <div className="probe-popover">
+                            <div className="audio-probe-title">Audio Probe</div>
+                            <div className="audio-probe-row">scanned: {audioProbe.scanned}</div>
+                            <div className="audio-probe-row">matched: {audioProbe.matched}</div>
+                            <div className="audio-probe-row">skipped: {audioProbe.skipped}</div>
+                            <div className="audio-probe-row">decode/play failed: {audioProbe.failed}</div>
+                            <div className="audio-probe-row">queue length: {audioProbe.queueLength}</div>
+                            <div className="audio-probe-row">scheduled sources: {audioProbe.scheduledSources}</div>
+                            <div className="audio-probe-row">last operation_id: {audioProbe.lastOperationId || "-"}</div>
+                            <div className="audio-probe-row">last chunk bytes: {audioProbe.lastBytes}</div>
+                            <div className="audio-probe-row">last chunk duration: {audioProbe.lastDurationMs.toFixed(1)} ms</div>
+                            <div className="audio-probe-row">last chunk rms: {audioProbe.lastRms.toFixed(4)}</div>
+                            <div className="audio-probe-row">last chunk peak: {audioProbe.lastPeak.toFixed(4)}</div>
+                            <div className="audio-probe-row">last boundary jump: {audioProbe.lastBoundaryJump.toFixed(4)}</div>
+                            <div className="audio-probe-row">last smoothing ms: {audioProbe.lastSmoothingMs.toFixed(1)}</div>
+                            <div className="audio-probe-row">last reason: {audioProbe.lastReason || "-"}</div>
+                            <div className="chunk-log-record-row">
+                                {!pcmRecording ? (
+                                    <button
+                                        type="button"
+                                        className="chunk-log-clear"
+                                        onClick={() => {
+                                            pcmRecordingRef.current = [];
+                                            setPcmRecording(true);
+                                        }}
+                                    >&#9210; Record PCM</button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        className="chunk-log-clear chunk-log-stop"
+                                        onClick={() => {
+                                            const chunks = pcmRecordingRef.current ?? [];
+                                            pcmRecordingRef.current = null;
+                                            setPcmRecording(false);
+                                            if (chunks.length === 0) {
+                                                alert("未录制到任何 PCM 数据，请先点 Record 再发起对话。");
+                                                return;
+                                            }
+                                            const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+                                            const merged = new Uint8Array(totalLen);
+                                            let offset = 0;
+                                            for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+                                            let binary = "";
+                                            for (let i = 0; i < merged.length; i++) { binary += String.fromCharCode(merged[i]); }
+                                            const b64 = btoa(binary);
+                                            void wsSavePCMBytes(b64)
+                                                .then((res) => {
+                                                    if (!res.success) {
+                                                        if (res.message === "已取消") {
+                                                            alert("已取消保存");
+                                                            return;
+                                                        }
+                                                        alert("保存失败: " + (res.message || "未知错误"));
+                                                        return;
+                                                    }
+                                                    alert("已保存: " + (res.message || "PCM 文件"));
+                                                })
+                                                .catch((err) => {
+                                                    const message = err instanceof Error ? err.message : String(err);
+                                                    alert("调用保存接口失败，请重启 wails dev 后重试。\n" + message);
+                                                });
+                                        }}
+                                    >&#9209; Stop &amp; Save</button>
+                                )}
+                                {pcmRecording ? <span className="chunk-log-recording-dot">&#9679; REC</span> : null}
+                            </div>
+                                                        {chunkLog.length > 0 ? (
+                                <div className="chunk-log-section">
+                                    <div className="chunk-log-header">
+                                        <span>Chunk Playback Log ({chunkLog.length})</span>
+                                        <button
+                                            type="button"
+                                            className="chunk-log-clear"
+                                            onClick={() => {
+                                                setChunkLog([]);
+                                                logSessionStartRef.current = null;
+                                            }}
+                                        >clear</button>
+                                    </div>
+                                    <div className="chunk-log-table-wrap">
+                                        <table className="chunk-log-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>+ms</th>
+                                                    <th>rms</th>
+                                                    <th>peak</th>
+                                                    <th>jump</th>
+                                                    <th>dur</th>
+                                                    <th>B</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {chunkLog.map((row, i) => (
+                                                    <tr key={i} className={row.jump > 0.15 ? "chunk-log-row-warn" : row.jump > 0.05 ? "chunk-log-row-mild" : ""}>
+                                                        <td>+{row.t}</td>
+                                                        <td>{row.rms.toFixed(3)}</td>
+                                                        <td>{row.peak.toFixed(3)}</td>
+                                                        <td>{row.jump.toFixed(3)}</td>
+                                                        <td>{row.dur.toFixed(0)}</td>
+                                                        <td>{row.bytes}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
+                    <button
+                        type="button"
+                        className="settings-button"
+                        aria-label="Open Settings"
+                        onClick={() => {
+                            setProbeDetailsOpen(false);
+                            setSettingsOpen((prev) => !prev);
+                        }}
+                    >
+                        ⚙
+                    </button>
+                    {settingsOpen ? (
+                        <div className="settings-popover">
+                            <label className="field">
+                                <span>Up Scroll Expand Feel</span>
+                                <select
+                                    value={scrollExpandPreset}
+                                    onChange={(event) => setScrollExpandPreset(event.target.value as "sensitive" | "stable")}
+                                >
+                                    <option value="sensitive">Sensitive (faster expand)</option>
+                                    <option value="stable">Stable (fewer accidental expands)</option>
+                                </select>
+                            </label>
+                            <label className="field">
+                                <span className="settings-checkbox-row">
+                                    <input
+                                        type="checkbox"
+                                        checked={autoPlayServerPCM}
+                                        onChange={(event) => {
+                                            void handleToggleAutoPlayServerPCM(event.target.checked);
+                                        }}
+                                    />
+                                    Real-time play server Base64 PCM chunks
+                                </span>
+                            </label>
+                            <label className="field">
+                                <span>Server PCM Sample Rate</span>
+                                <select
+                                    value={String(serverPCMSampleRate)}
+                                    onChange={(event) => setServerPCMSampleRate(Number(event.target.value) || 16000)}
+                                >
+                                    <option value="16000">16000 Hz</option>
+                                    <option value="24000">24000 Hz</option>
+                                    <option value="32000">32000 Hz</option>
+                                    <option value="48000">48000 Hz</option>
+                                </select>
+                            </label>
+                            <label className="field">
+                                <span>Server PCM Channels</span>
+                                <select
+                                    value={String(serverPCMChannels)}
+                                    onChange={(event) => setServerPCMChannels(Number(event.target.value) === 2 ? 2 : 1)}
+                                >
+                                    <option value="1">Mono (1)</option>
+                                    <option value="2">Stereo (2)</option>
+                                </select>
+                            </label>
+                            <label className="field">
+                                <span>Playback Mode</span>
+                                <select
+                                    value={String(serverPCMMaxScheduledSources)}
+                                    onChange={(event) => {
+                                        const next = Number(event.target.value);
+                                        setServerPCMMaxScheduledSources(Number.isFinite(next) ? Math.max(1, Math.min(10, Math.floor(next))) : 2);
+                                    }}
+                                >
+                                    <option value="1">Strict Serial (1)</option>
+                                    <option value="2">1-ahead (2, recommended)</option>
+                                    <option value="3">2-ahead (3)</option>
+                                    <option value="4">3-ahead (4)</option>
+                                    <option value="5">4-ahead (5)</option>
+                                    <option value="6">5-ahead (6)</option>
+                                    <option value="7">6-ahead (7)</option>
+                                    <option value="8">7-ahead (8)</option>
+                                    <option value="9">8-ahead (9)</option>
+                                    <option value="10">9-ahead (10)</option>
+                                </select>
+                            </label>
+                            <label className="field">
+                                <span>Start Buffer Threshold</span>
+                                <select
+                                    value={String(serverPCMMinStartBufferMs)}
+                                    onChange={(event) => {
+                                        const next = Number(event.target.value);
+                                        setServerPCMMinStartBufferMs(Number.isFinite(next) ? Math.max(40, Math.min(400, Math.floor(next))) : 120);
+                                    }}
+                                >
+                                    <option value="80">80 ms (low latency)</option>
+                                    <option value="120">120 ms (balanced)</option>
+                                    <option value="180">180 ms (stable)</option>
+                                    <option value="240">240 ms (very stable)</option>
+                                </select>
+                            </label>
+                            <div className="audio-probe-block">
+                                <div className="audio-probe-title">Audio Probe</div>
+                                <div className="audio-probe-row">scanned: {audioProbe.scanned}</div>
+                                <div className="audio-probe-row">matched: {audioProbe.matched}</div>
+                                <div className="audio-probe-row">skipped: {audioProbe.skipped}</div>
+                                <div className="audio-probe-row">decode/play failed: {audioProbe.failed}</div>
+                                <div className="audio-probe-row">queue length: {audioProbe.queueLength}</div>
+                                <div className="audio-probe-row">scheduled sources: {audioProbe.scheduledSources}</div>
+                                <div className="audio-probe-row">last operation_id: {audioProbe.lastOperationId || "-"}</div>
+                                <div className="audio-probe-row">last chunk bytes: {audioProbe.lastBytes}</div>
+                                <div className="audio-probe-row">last chunk duration: {audioProbe.lastDurationMs.toFixed(1)} ms</div>
+                                <div className="audio-probe-row">last chunk rms: {audioProbe.lastRms.toFixed(4)}</div>
+                                <div className="audio-probe-row">last chunk peak: {audioProbe.lastPeak.toFixed(4)}</div>
+                                <div className="audio-probe-row">last boundary jump: {audioProbe.lastBoundaryJump.toFixed(4)}</div>
+                                <div className="audio-probe-row">last smoothing ms: {audioProbe.lastSmoothingMs.toFixed(1)}</div>
+                                <div className="audio-probe-row">last reason: {audioProbe.lastReason || "-"}</div>
+                            </div>
+                        </div>
+                    ) : null}
+                </div>
+            </header>
+            <div className="workspace-grid">
+                <div className="left-column">
+                    <ConnectionPanel
+                        url={url}
+                        headersText={headersText}
+                        queryParamsText={queryParamsText}
+                        subprotocol={subprotocol}
+                        connected={connected}
+                        statusText={statusText}
+                        savedConnections={savedConnections}
+                        isCollapsed={connectionPanelCollapsed}
+                        onToggleCollapsed={() => setConnectionPanelCollapsed((prev) => !prev)}
+                        onUrlChange={setUrl}
+                        onHeadersChange={setHeadersText}
+                        onQueryParamsChange={setQueryParamsText}
+                        onSubprotocolChange={setSubprotocol}
+                        onConnect={handleConnect}
+                        onReconnect={handleReconnect}
+                        onDisconnect={handleDisconnect}
+                        onPing={handlePing}
+                        onUseSavedConnection={handleUseSavedConnection}
+                        onSaveCurrentConnection={handleSaveCurrentConnection}
+                    />
+                    <SendPanel
+                        textPayload={textPayload}
+                        binaryPayload={binaryPayload}
+                        binaryFilePath={binaryFilePath}
+                        pcmFilePath={pcmFilePath}
+                        sampleRate={sampleRate}
+                        channels={channels}
+                        bitDepth={bitDepth}
+                        frameMs={frameMs}
+                        seqStart={seqStart}
+                        headerRules={headerRules}
+                        headerTemplates={headerTemplates}
+                        streaming={streaming}
+                        connected={connected}
+                        sessionProfile={sessionProfile}
+                        streamStatus={streamStatus}
+                        audioFileInfo={audioFileInfo}
+                        translationFromLanguage={translationFromLanguage}
+                        translationToLanguagesText={translationToLanguagesText}
+                        audioParamSource={audioParamSource}
+                        headerConfigSource={headerConfigSource}
+                        onTextChange={setTextPayload}
+                        onBinaryChange={setBinaryPayload}
+                        onBinaryFilePathChange={setBinaryFilePath}
+                        onPcmFilePathChange={(value) => {
+                            setPcmFilePath(value);
+                            if (audioFileInfo?.path !== value.trim()) {
+                                setAudioFileInfo(undefined);
+                            }
+                        }}
+                        onPickBinaryFile={handlePickBinaryFile}
+                        onPickPcmFile={handlePickPcmFile}
+                        onSampleRateChange={(value) => {
+                            setSampleRate(value);
+                            setAudioParamSource("Manual");
+                        }}
+                        onChannelsChange={(value) => {
+                            setChannels(value);
+                            setAudioParamSource("Manual");
+                        }}
+                        onBitDepthChange={(value) => {
+                            setBitDepth(value);
+                            setAudioParamSource("Manual");
+                        }}
+                        onFrameMsChange={(value) => {
+                            setFrameMs(value);
+                            setAudioParamSource("Manual");
+                        }}
+                        onSeqStartChange={(value) => {
+                            setSeqStart(value);
+                            setHeaderConfigSource("Manual");
+                        }}
+                        onHeaderRulesChange={(value) => {
+                            setHeaderRules(value);
+                            setHeaderConfigSource("Manual");
+                        }}
+                        onSaveHeaderTemplate={handleSaveHeaderTemplate}
+                        onLoadHeaderTemplate={handleLoadHeaderTemplate}
+                        onRenameHeaderTemplate={handleRenameHeaderTemplate}
+                        onDeleteHeaderTemplate={handleDeleteHeaderTemplate}
+                        onApplyMiniTranslationPreset={handleApplyMiniTranslationPreset}
+                        onRunMiniTranslation={handleRunMiniTranslation}
+                        onTranslationFromLanguageChange={(value) => setTranslationFromLanguage(normalizeLanguageTag(value) || value.trim())}
+                        onTranslationToLanguagesChange={(value) => setTranslationToLanguagesText(value)}
+                        onApplyTranslationLanguagePreset={(fromLanguage, toLanguages) => {
+                            const normalizedFromLanguage = normalizeLanguageTag(fromLanguage) || "zh-CN";
+                            const normalizedToLanguagesText = toLanguages
+                                .map((item) => normalizeLanguageTag(item))
+                                .filter(Boolean)
+                                .join(", ");
+                            setTranslationFromLanguage(normalizedFromLanguage);
+                            setTranslationToLanguagesText(normalizedToLanguagesText);
+                            if (sessionProfile === "translation") {
+                                setTextPayload(buildTranslationStartTemplate(normalizedFromLanguage, normalizedToLanguagesText));
+                            }
+                        }}
+                        onSessionProfileChange={setSessionProfile}
+                        onApplyJSONTemplate={handleApplyJSONTemplate}
+                        onSendText={handleSendText}
+                        onSendBinary={handleSendBinary}
+                        onSendBinaryFile={handleSendBinaryFile}
+                        onRunSession={handleRunSession}
+                        onStartStream={handleStartStream}
+                        onStopStream={handleStopStream}
+                        onScrollCollapse={(collapsed) => setConnectionPanelCollapsed(collapsed)}
+                        scrollExpandPreset={scrollExpandPreset}
+                    />
+                    <ResponsePanel frame={latestInboundFrame} sessionSummary={sessionSummary} liveText={liveAssistantText} />
+                </div>
+                <div className="right-column">
+                    <FrameList
+                        frames={frames}
+                        selectedId={selectedId}
+                        searchText={searchText}
+                        directionFilter={directionFilter}
+                        typeFilter={typeFilter}
+                        onSelect={setSelectedId}
+                        onClear={handleClear}
+                        onSearchTextChange={setSearchText}
+                        onDirectionFilterChange={setDirectionFilter}
+                        onTypeFilterChange={setTypeFilter}
+                    />
+                    <FrameDetail frame={selectedFrame} />
+                </div>
             </div>
-            <SendPanel
-                textPayload={textPayload}
-                binaryPayload={binaryPayload}
-                binaryFilePath={binaryFilePath}
-                pcmFilePath={pcmFilePath}
-                sampleRate={sampleRate}
-                channels={channels}
-                bitDepth={bitDepth}
-                frameMs={frameMs}
-                seqStart={seqStart}
-                headerRules={headerRules}
-                headerTemplates={headerTemplates}
-                streaming={streaming}
-                connected={connected}
-                sessionProfile={sessionProfile}
-                streamStatus={streamStatus}
-                onTextChange={setTextPayload}
-                onBinaryChange={setBinaryPayload}
-                onBinaryFilePathChange={setBinaryFilePath}
-                onPcmFilePathChange={setPcmFilePath}
-                onPickBinaryFile={handlePickBinaryFile}
-                onPickPcmFile={handlePickPcmFile}
-                onSampleRateChange={setSampleRate}
-                onChannelsChange={setChannels}
-                onBitDepthChange={setBitDepth}
-                onFrameMsChange={setFrameMs}
-                onSeqStartChange={setSeqStart}
-                onHeaderRulesChange={setHeaderRules}
-                onSaveHeaderTemplate={handleSaveHeaderTemplate}
-                onLoadHeaderTemplate={handleLoadHeaderTemplate}
-                onRenameHeaderTemplate={handleRenameHeaderTemplate}
-                onDeleteHeaderTemplate={handleDeleteHeaderTemplate}
-                onSessionProfileChange={setSessionProfile}
-                onApplyJSONTemplate={handleApplyJSONTemplate}
-                onSendText={handleSendText}
-                onSendBinary={handleSendBinary}
-                onSendBinaryFile={handleSendBinaryFile}
-                onRunSession={handleRunSession}
-                onStartStream={handleStartStream}
-                onStopStream={handleStopStream}
-            />
-            <ResponsePanel frame={latestInboundFrame} sessionSummary={sessionSummary} />
         </div>
     );
 }

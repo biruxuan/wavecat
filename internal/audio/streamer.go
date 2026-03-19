@@ -1,10 +1,12 @@
 package audio
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +33,13 @@ type Streamer struct {
 	finishReason string
 }
 
+type wavFileInfo struct {
+	SampleRate int
+	Channels   int
+	BitDepth   int
+	Data       []byte
+}
+
 func NewStreamer(wsClient *ws.Client, store *frame.Store) *Streamer {
 	return &Streamer{wsClient: wsClient, store: store}
 }
@@ -41,7 +50,7 @@ func (s *Streamer) Start(config model.AudioStreamConfig) error {
 		return err
 	}
 
-	file, err := os.Open(cfg.FilePath)
+	reader, err := openAudioReader(cfg.FilePath)
 	if err != nil {
 		return err
 	}
@@ -49,7 +58,7 @@ func (s *Streamer) Start(config model.AudioStreamConfig) error {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
-		_ = file.Close()
+		_ = reader.Close()
 		return fmt.Errorf("PCM 流正在发送中")
 	}
 	stopCh := make(chan struct{})
@@ -66,7 +75,7 @@ func (s *Streamer) Start(config model.AudioStreamConfig) error {
 	s.mu.Unlock()
 
 	s.store.Add(frame.BuildEventFrame(fmt.Sprintf("PCM stream started: %s", cfg.FilePath), ""))
-	go s.streamLoop(file, frameBytes, cfg.FrameMs, cfg.HeaderRules, stopCh)
+	go s.streamLoop(reader, frameBytes, cfg.FrameMs, cfg.HeaderRules, stopCh)
 
 	return nil
 }
@@ -111,8 +120,8 @@ func (s *Streamer) Status() model.AudioStreamStatusDTO {
 	}
 }
 
-func (s *Streamer) streamLoop(file *os.File, frameBytes int, frameMs int, headerRules []model.AudioHeaderFieldRule, stopCh chan struct{}) {
-	defer file.Close()
+func (s *Streamer) streamLoop(reader io.ReadCloser, frameBytes int, frameMs int, headerRules []model.AudioHeaderFieldRule, stopCh chan struct{}) {
+	defer reader.Close()
 	ticker := time.NewTicker(time.Duration(frameMs) * time.Millisecond)
 	defer ticker.Stop()
 
@@ -124,7 +133,7 @@ func (s *Streamer) streamLoop(file *os.File, frameBytes int, frameMs int, header
 			s.store.Add(frame.BuildEventFrame("PCM stream stopped", ""))
 			return
 		case <-ticker.C:
-			n, readErr := io.ReadFull(file, buffer)
+			n, readErr := io.ReadFull(reader, buffer)
 			if readErr != nil {
 				if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
 					if n > 0 {
@@ -199,6 +208,118 @@ func (s *Streamer) streamLoop(file *os.File, frameBytes int, frameMs int, header
 			s.mu.Unlock()
 		}
 	}
+}
+
+func openAudioReader(filePath string) (io.ReadCloser, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext == ".wav" {
+		payload, err := parseWAVData(filePath)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(payload)), nil
+	}
+	return os.Open(filePath)
+}
+
+func parseWAVData(filePath string) ([]byte, error) {
+	info, err := parseWAVFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return info.Data, nil
+}
+
+func InspectFile(filePath string) (model.AudioFileInfoDTO, error) {
+	trimmedPath := strings.TrimSpace(filePath)
+	if trimmedPath == "" {
+		return model.AudioFileInfoDTO{}, fmt.Errorf("filePath 不能为空")
+	}
+
+	ext := strings.ToLower(filepath.Ext(trimmedPath))
+	if ext == ".wav" {
+		info, err := parseWAVFile(trimmedPath)
+		if err != nil {
+			return model.AudioFileInfoDTO{}, err
+		}
+		return model.AudioFileInfoDTO{
+			Success:    true,
+			Path:       trimmedPath,
+			Format:     "wav",
+			SampleRate: info.SampleRate,
+			Channels:   info.Channels,
+			BitDepth:   info.BitDepth,
+			DataBytes:  len(info.Data),
+			Message:    "wav metadata loaded",
+		}, nil
+	}
+
+	stat, err := os.Stat(trimmedPath)
+	if err != nil {
+		return model.AudioFileInfoDTO{}, err
+	}
+
+	return model.AudioFileInfoDTO{
+		Success:   true,
+		Path:      trimmedPath,
+		Format:    "pcm",
+		DataBytes: int(stat.Size()),
+		Message:   "raw pcm file, metadata unavailable",
+	}, nil
+}
+
+func parseWAVFile(filePath string) (wavFileInfo, error) {
+	b, err := os.ReadFile(filePath)
+	if err != nil {
+		return wavFileInfo{}, err
+	}
+	if len(b) < 12 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WAVE" {
+		return wavFileInfo{}, fmt.Errorf("不是有效的 RIFF/WAVE 文件: %s", filePath)
+	}
+
+	var info wavFileInfo
+	hasFmt := false
+	hasData := false
+	offset := 12
+	for offset+8 <= len(b) {
+		chunkID := string(b[offset : offset+4])
+		chunkSize := int(binary.LittleEndian.Uint32(b[offset+4 : offset+8]))
+		offset += 8
+
+		chunkEnd := offset + chunkSize
+		if chunkEnd > len(b) {
+			chunkEnd = len(b)
+		}
+
+		switch chunkID {
+		case "fmt ":
+			if chunkEnd-offset < 16 {
+				return wavFileInfo{}, fmt.Errorf("WAV fmt chunk 长度不足: %s", filePath)
+			}
+			info.Channels = int(binary.LittleEndian.Uint16(b[offset+2 : offset+4]))
+			info.SampleRate = int(binary.LittleEndian.Uint32(b[offset+4 : offset+8]))
+			info.BitDepth = int(binary.LittleEndian.Uint16(b[offset+14 : offset+16]))
+			hasFmt = true
+		case "data":
+			info.Data = make([]byte, chunkEnd-offset)
+			copy(info.Data, b[offset:chunkEnd])
+			hasData = true
+		}
+
+		offset += chunkSize
+		if chunkSize%2 != 0 {
+			offset++
+		}
+	}
+
+	if !hasFmt {
+		return wavFileInfo{}, fmt.Errorf("WAV 文件缺少 fmt chunk: %s", filePath)
+	}
+	if !hasData {
+		return wavFileInfo{}, fmt.Errorf("WAV 文件缺少 data chunk: %s", filePath)
+	}
+
+	return info, nil
 }
 
 func buildPacket(rules []model.AudioHeaderFieldRule, seq int, payload []byte, isFirst bool, isMiddle bool, isLast bool) ([]byte, error) {

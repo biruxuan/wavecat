@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"wavecat/internal/audio"
 	"wavecat/internal/frame"
@@ -172,9 +173,10 @@ func (a *App) WsPickPCMFile() model.FilePickResult {
 	}
 
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "选择 PCM 文件",
+		Title: "选择 PCM/WAV 文件",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "PCM Audio", Pattern: "*.pcm"},
+			{DisplayName: "WAV Audio", Pattern: "*.wav"},
 			{DisplayName: "All Files", Pattern: "*"},
 		},
 	})
@@ -186,4 +188,43 @@ func (a *App) WsPickPCMFile() model.FilePickResult {
 	}
 
 	return model.FilePickResult{Success: true, Path: path, Message: "selected"}
+}
+
+func (a *App) WsInspectAudioFile(filePath string) model.AudioFileInfoDTO {
+	info, err := audio.InspectFile(filePath)
+	if err != nil {
+		return model.AudioFileInfoDTO{
+			Success: false,
+			Path:    strings.TrimSpace(filePath),
+			Message: err.Error(),
+		}
+	}
+	return info
+}
+
+func (a *App) WsSavePCMBytes(base64Data string) model.SendResult {
+	if a.ctx == nil {
+		return model.SendResult{Success: false, Message: "应用上下文未就绪"}
+	}
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "保存 PCM 录音",
+		DefaultFilename: fmt.Sprintf("wavecat_%d.pcm", time.Now().UnixMilli()),
+		Filters: []runtime.FileFilter{
+			{DisplayName: "PCM Audio (*.pcm)", Pattern: "*.pcm"},
+		},
+	})
+	if err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+	if path == "" {
+		return model.SendResult{Success: false, Message: "已取消"}
+	}
+	data, err := base64.StdEncoding.DecodeString(base64Data)
+	if err != nil {
+		return model.SendResult{Success: false, Message: "base64 decode 失败: " + err.Error()}
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return model.SendResult{Success: false, Message: "写文件失败: " + err.Error()}
+	}
+	return model.SendResult{Success: true, Message: path}
 }

@@ -55,6 +55,17 @@ export interface FilePickResult {
   message: string;
 }
 
+export interface AudioFileInfo {
+  success: boolean;
+  path: string;
+  format: string;
+  sampleRate: number;
+  channels: number;
+  bitDepth: number;
+  dataBytes: number;
+  message: string;
+}
+
 export interface AudioStreamStatus {
   running: boolean;
   filePath: string;

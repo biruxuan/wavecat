@@ -25,7 +25,8 @@ export function FrameDetail({ frame }: Props) {
   const [copyText, setCopyText] = useState("Copy");
 
   useEffect(() => {
-    setActiveTab(availableTabs[0] ?? "summary");
+    const prefersTextTab = frame?.type === "text" && availableTabs.includes("text");
+    setActiveTab(prefersTextTab ? "text" : availableTabs[0] ?? "summary");
     setCopyText("Copy");
   }, [availableTabs, frame?.id]);
 

@@ -1,10 +1,13 @@
-import type { AudioHeaderFieldRule, AudioStreamStatus, SessionProfileType } from "../types";
+import { useRef } from "react";
+import type { AudioFileInfo, AudioHeaderFieldRule, AudioStreamStatus, SessionProfileType } from "../types";
 
 type HeaderTemplate = {
   name: string;
   seqStart: number;
   headerRules: AudioHeaderFieldRule[];
 };
+
+type ScrollExpandPreset = "sensitive" | "stable";
 
 type Props = {
   textPayload: string;
@@ -22,6 +25,11 @@ type Props = {
   connected: boolean;
   sessionProfile: SessionProfileType;
   streamStatus: AudioStreamStatus;
+  audioFileInfo?: AudioFileInfo;
+  translationFromLanguage: string;
+  translationToLanguagesText: string;
+  audioParamSource: string;
+  headerConfigSource: string;
   onTextChange: (value: string) => void;
   onBinaryChange: (value: string) => void;
   onBinaryFilePathChange: (value: string) => void;
@@ -38,6 +46,11 @@ type Props = {
   onLoadHeaderTemplate: (index: number) => void;
   onRenameHeaderTemplate: (index: number) => void;
   onDeleteHeaderTemplate: (index: number) => void;
+  onApplyMiniTranslationPreset: () => void;
+  onRunMiniTranslation: () => void;
+  onTranslationFromLanguageChange: (value: string) => void;
+  onTranslationToLanguagesChange: (value: string) => void;
+  onApplyTranslationLanguagePreset: (fromLanguage: string, toLanguages: string[]) => void;
   onSessionProfileChange: (value: SessionProfileType) => void;
   onApplyJSONTemplate: (template: string) => void;
   onSendText: () => void;
@@ -46,6 +59,8 @@ type Props = {
   onRunSession: () => void;
   onStartStream: () => void;
   onStopStream: () => void;
+  onScrollCollapse?: (collapsed: boolean) => void;
+  scrollExpandPreset: ScrollExpandPreset;
 };
 
 export function SendPanel({
@@ -64,6 +79,11 @@ export function SendPanel({
   connected,
   sessionProfile,
   streamStatus,
+  audioFileInfo,
+  translationFromLanguage,
+  translationToLanguagesText,
+  audioParamSource,
+  headerConfigSource,
   onTextChange,
   onSendText,
   onBinaryChange,
@@ -81,6 +101,11 @@ export function SendPanel({
   onLoadHeaderTemplate,
   onRenameHeaderTemplate,
   onDeleteHeaderTemplate,
+  onApplyMiniTranslationPreset,
+  onRunMiniTranslation,
+  onTranslationFromLanguageChange,
+  onTranslationToLanguagesChange,
+  onApplyTranslationLanguagePreset,
   onSessionProfileChange,
   onApplyJSONTemplate,
   onSendBinary,
@@ -88,7 +113,51 @@ export function SendPanel({
   onRunSession,
   onStartStream,
   onStopStream,
+  onScrollCollapse,
+  scrollExpandPreset,
 }: Props) {
+  const atTopSinceRef = useRef<number | null>(null);
+  const topUpWheelAccumRef = useRef(0);
+  const TOP_DWELL_MS = scrollExpandPreset === "sensitive" ? 220 : 420;
+  const TOP_UP_ACCUM_THRESHOLD = scrollExpandPreset === "sensitive" ? 10 : 20;
+  const TOP_FORCE_UP_ACCUM_THRESHOLD = scrollExpandPreset === "sensitive" ? 22 : 36;
+
+  const handleScroll = onScrollCollapse
+    ? (e: React.UIEvent<HTMLElement>) => {
+        const top = e.currentTarget.scrollTop;
+        if (top > 0) {
+          atTopSinceRef.current = null;
+          topUpWheelAccumRef.current = 0;
+          onScrollCollapse(true);
+        } else if (atTopSinceRef.current === null) {
+          atTopSinceRef.current = Date.now();
+          topUpWheelAccumRef.current = 0;
+        }
+      }
+    : undefined;
+
+  const handleWheel = onScrollCollapse
+    ? (e: React.WheelEvent<HTMLElement>) => {
+        if (e.currentTarget.scrollTop !== 0) {
+          return;
+        }
+        if (e.deltaY < 0) {
+          topUpWheelAccumRef.current += -e.deltaY;
+          const since = atTopSinceRef.current;
+          const dwellReached = since !== null && Date.now() - since >= TOP_DWELL_MS;
+          const intentReached = topUpWheelAccumRef.current >= TOP_UP_ACCUM_THRESHOLD;
+          const forceReached = topUpWheelAccumRef.current >= TOP_FORCE_UP_ACCUM_THRESHOLD;
+          if ((dwellReached && intentReached) || forceReached) {
+            onScrollCollapse(false);
+            atTopSinceRef.current = Date.now();
+            topUpWheelAccumRef.current = 0;
+          }
+        } else if (e.deltaY > 0) {
+          topUpWheelAccumRef.current = 0;
+        }
+      }
+    : undefined;
+
   const bytesPerSample = bitDepth > 0 ? bitDepth / 8 : 0;
   const frameBytes =
     sampleRate > 0 && channels > 0 && bytesPerSample > 0 && frameMs > 0
@@ -219,8 +288,19 @@ export function SendPanel({
     onHeaderRulesChange(next);
   };
 
+  const translationTargetPresets = [
+    { label: "English", value: ["en-US"] },
+    { label: "Japanese", value: ["ja-JP"] },
+    { label: "Korean", value: ["ko-KR"] },
+    { label: "English + Japanese", value: ["en-US", "ja-JP"] },
+  ];
+
   return (
-    <section className="panel send-panel">
+    <section
+      className="panel send-panel"
+      onScroll={handleScroll}
+      onWheel={handleWheel}
+    >
       <div className="panel-title">Send Panel</div>
       <div className="panel-header">
         <div className="panel-title">JSON Body</div>
@@ -236,6 +316,57 @@ export function SendPanel({
           <option value="chat">chat</option>
         </select>
       </label>
+      {sessionProfile === "translation" ? (
+        <>
+          <div className="panel-header">
+            <div className="panel-title">Translation Languages</div>
+            <button type="button" onClick={() => onApplyJSONTemplate("translation_start")}>Apply To Start JSON</button>
+          </div>
+          <div className="audio-grid">
+            <label className="field">
+              <span>From Language</span>
+              <input
+                value={translationFromLanguage}
+                onChange={(event) => onTranslationFromLanguageChange(event.target.value)}
+                placeholder="zh-CN"
+              />
+            </label>
+            <label className="field">
+              <span>To Languages</span>
+              <input
+                value={translationToLanguagesText}
+                onChange={(event) => onTranslationToLanguagesChange(event.target.value)}
+                placeholder="en-US, ja-JP"
+              />
+            </label>
+          </div>
+          <div className="button-row button-row-wrap">
+            <button type="button" onClick={() => onApplyTranslationLanguagePreset("zh-CN", ["en-US"])}>zh-CN → en-US</button>
+            <button type="button" onClick={() => onApplyTranslationLanguagePreset("zh-CN", ["ja-JP"])}>zh-CN → ja-JP</button>
+            <button type="button" onClick={() => onApplyTranslationLanguagePreset("en-US", ["zh-CN"])}>en-US → zh-CN</button>
+            {translationTargetPresets.map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                onClick={() => onApplyTranslationLanguagePreset(translationFromLanguage || "zh-CN", preset.value)}
+              >
+                Targets: {preset.value.join(", ")}
+              </button>
+            ))}
+          </div>
+          <div className="status-text">Language tags use full form, for example zh-CN / en-US / ja-JP.</div>
+        </>
+      ) : null}
+      {audioFileInfo?.success ? (
+        <div className="status-text">
+          Audio file: {audioFileInfo.format.toUpperCase()} | bytes: {audioFileInfo.dataBytes}
+          {audioFileInfo.format === "wav"
+            ? ` | ${audioFileInfo.sampleRate}Hz | ${audioFileInfo.channels}ch | ${audioFileInfo.bitDepth}bit`
+            : " | raw metadata unavailable"}
+        </div>
+      ) : null}
+      <div className="status-text">Audio params source: {audioParamSource}</div>
+      <div className="status-text">Header config source: {headerConfigSource}</div>
       <label className="field">
         <span>Variables: {"${message_id}"} {"${operation_id}"} {"${conversation_id}"} {"${stream_id}"} {"${created_at}"}</span>
         <textarea
@@ -280,12 +411,12 @@ export function SendPanel({
       </button>
 
       <label className="field">
-        <span>PCM File Path</span>
+        <span>PCM/WAV File Path</span>
         <div className="path-row">
           <input
             value={pcmFilePath}
             onChange={(event) => onPcmFilePathChange(event.target.value)}
-            placeholder="/absolute/path/to/audio.pcm"
+            placeholder="/absolute/path/to/audio.pcm or audio.wav"
           />
           <button type="button" onClick={onPickPcmFile}>
             选择文件
@@ -340,6 +471,7 @@ export function SendPanel({
         <div className="panel-title">PCM Header Rules</div>
         <div className="button-row">
           <button type="button" onClick={addHeaderRule}>Add Header Field</button>
+          <button type="button" onClick={onApplyMiniTranslationPreset}>Use Mini Translation Preset</button>
           <button type="button" onClick={() => addHeaderTemplate("seq")}>+ seq</button>
           <button type="button" onClick={() => addHeaderTemplate("timestamp")}>+ timestamp</button>
           <button type="button" onClick={() => addHeaderTemplate("payload_len")}>+ payload_len</button>
@@ -451,6 +583,9 @@ export function SendPanel({
       {streamStatus.lastError ? <div className="error-box">{streamStatus.lastError}</div> : null}
 
       <div className="button-row">
+        <button disabled={streaming || !pcmFilePath.trim() || validationErrors.length > 0} onClick={onRunMiniTranslation}>
+          Run Mini Translation
+        </button>
         <button disabled={streaming || !pcmFilePath.trim() || validationErrors.length > 0} onClick={onRunSession}>
           Run Session
         </button>

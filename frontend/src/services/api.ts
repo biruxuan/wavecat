@@ -1,4 +1,5 @@
 import type {
+  AudioFileInfo,
   AudioStreamConfig,
   AudioStreamStatus,
   ConnectionConfig,
@@ -23,6 +24,8 @@ type AppBridge = {
   WsPCMStreamStatus: () => Promise<AudioStreamStatus>;
   WsPickBinaryFile: () => Promise<FilePickResult>;
   WsPickPCMFile: () => Promise<FilePickResult>;
+  WsInspectAudioFile: (filePath: string) => Promise<AudioFileInfo>;
+    WsSavePCMBytes: (base64Data: string) => Promise<SendResult>;
 };
 
 function appBridge(): AppBridge {
@@ -88,3 +91,11 @@ export async function wsPickBinaryFile(): Promise<FilePickResult> {
 export async function wsPickPCMFile(): Promise<FilePickResult> {
   return appBridge().WsPickPCMFile();
 }
+
+export async function wsInspectAudioFile(filePath: string): Promise<AudioFileInfo> {
+  return appBridge().WsInspectAudioFile(filePath);
+}
+
+  export async function wsSavePCMBytes(base64Data: string): Promise<SendResult> {
+    return appBridge().WsSavePCMBytes(base64Data);
+  }

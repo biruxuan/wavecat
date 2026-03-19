@@ -16,6 +16,8 @@ type Props = {
   connected: boolean;
   statusText: string;
   savedConnections: SavedConnection[];
+  isCollapsed: boolean;
+  onToggleCollapsed: () => void;
   onUrlChange: (value: string) => void;
   onHeadersChange: (value: string) => void;
   onQueryParamsChange: (value: string) => void;
@@ -38,6 +40,8 @@ export function ConnectionPanel(props: Props) {
     connected,
     statusText,
     savedConnections,
+    isCollapsed,
+    onToggleCollapsed,
     onUrlChange,
     onHeadersChange,
     onQueryParamsChange,
@@ -61,81 +65,98 @@ export function ConnectionPanel(props: Props) {
 
   return (
     <form className="panel connection-panel" onSubmit={handleSubmit}>
-      <div className="panel-title">Connection</div>
-      <label className="field">
-        <span>URL</span>
-        <input
-          value={url}
-          onChange={(event) => onUrlChange(event.target.value)}
-          placeholder="ws://localhost:8080/ws"
-        />
-      </label>
       <div className="panel-header">
-        <div className="status-text">Advanced: Headers / Query Params / Subprotocol</div>
-        <button type="button" onClick={() => setShowAdvanced((prev) => !prev)}>
-          {showAdvanced ? "Collapse" : "Expand"}
-        </button>
+        <div className="connection-collapsed-left">
+          <span className="panel-title">Connection</span>
+          {isCollapsed && (
+            <span className="status-text connection-url-preview">{url}</span>
+          )}
+        </div>
+        <div className="connection-collapsed-right">
+          {isCollapsed && <span className="status-text">{statusText}</span>}
+          <button type="button" onClick={onToggleCollapsed}>
+            {isCollapsed ? "Expand" : "Collapse"}
+          </button>
+        </div>
       </div>
-      {showAdvanced ? (
-        <>
+      <div className={`connection-body-wrap${isCollapsed ? " collapsed" : ""}`}>
+        <div className="connection-body-inner">
           <label className="field">
-            <span>Headers (JSON)</span>
-            <textarea
-              className="headers-textarea"
-              value={headersText}
-              onChange={(event) => onHeadersChange(event.target.value)}
-              placeholder='{"Authorization":"Bearer ..."}'
-              rows={2}
-            />
-          </label>
-          <label className="field">
-            <span>Query Params (JSON)</span>
-            <textarea
-              className="headers-textarea"
-              value={queryParamsText}
-              onChange={(event) => onQueryParamsChange(event.target.value)}
-              placeholder='{"token":"abc","debug":"1"}'
-              rows={2}
-            />
-          </label>
-          <label className="field">
-            <span>Subprotocol</span>
+            <span>URL</span>
             <input
-              value={subprotocol}
-              onChange={(event) => onSubprotocolChange(event.target.value)}
-              placeholder="例如：chat / asr / tts"
+              value={url}
+              onChange={(event) => onUrlChange(event.target.value)}
+              placeholder="ws://localhost:8080/ws"
             />
           </label>
-        </>
-      ) : null}
-      {savedConnections.length > 0 ? (
-        <label className="field">
-          <span>Recent Connections</span>
-          <select defaultValue="" onChange={(event) => onUseSavedConnection(Number(event.target.value))}>
-            <option value="" disabled>
-              选择最近保存的连接
-            </option>
-            {savedConnections.map((item, index) => (
-              <option key={`${item.name}-${index}`} value={index}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-      <div className="button-row">
-        <button type="submit">{connected ? "Disconnect" : "Connect"}</button>
-        <button type="button" onClick={onPing} disabled={!connected}>
-          Ping
-        </button>
-        <button type="button" onClick={onReconnect}>
-          Reconnect
-        </button>
-        <button type="button" onClick={onSaveCurrentConnection}>
-          Save
-        </button>
+          <div className="panel-header">
+            <div className="status-text">Advanced: Headers / Query Params / Subprotocol</div>
+            <button type="button" onClick={() => setShowAdvanced((prev) => !prev)}>
+              {showAdvanced ? "Collapse" : "Expand"}
+            </button>
+          </div>
+          {showAdvanced ? (
+            <>
+              <label className="field">
+                <span>Headers (JSON)</span>
+                <textarea
+                  className="headers-textarea"
+                  value={headersText}
+                  onChange={(event) => onHeadersChange(event.target.value)}
+                  placeholder='{"Authorization":"Bearer ..."}'
+                  rows={2}
+                />
+              </label>
+              <label className="field">
+                <span>Query Params (JSON)</span>
+                <textarea
+                  className="headers-textarea"
+                  value={queryParamsText}
+                  onChange={(event) => onQueryParamsChange(event.target.value)}
+                  placeholder='{"token":"abc","debug":"1"}'
+                  rows={2}
+                />
+              </label>
+              <label className="field">
+                <span>Subprotocol</span>
+                <input
+                  value={subprotocol}
+                  onChange={(event) => onSubprotocolChange(event.target.value)}
+                  placeholder="例如：chat / asr / tts"
+                />
+              </label>
+            </>
+          ) : null}
+          {savedConnections.length > 0 ? (
+            <label className="field">
+              <span>Recent Connections</span>
+              <select defaultValue="" onChange={(event) => onUseSavedConnection(Number(event.target.value))}>
+                <option value="" disabled>
+                  选择最近保存的连接
+                </option>
+                {savedConnections.map((item, index) => (
+                  <option key={`${item.name}-${index}`} value={index}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <div className="button-row">
+            <button type="submit">{connected ? "Disconnect" : "Connect"}</button>
+            <button type="button" onClick={onPing} disabled={!connected}>
+              Ping
+            </button>
+            <button type="button" onClick={onReconnect}>
+              Reconnect
+            </button>
+            <button type="button" onClick={onSaveCurrentConnection}>
+              Save
+            </button>
+          </div>
+          <div className="status-text">{statusText}</div>
+        </div>
       </div>
-      <div className="status-text">{statusText}</div>
     </form>
   );
 }

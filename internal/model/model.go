@@ -57,6 +57,17 @@ type FilePickResult struct {
 	Message string `json:"message"`
 }
 
+type AudioFileInfoDTO struct {
+	Success    bool   `json:"success"`
+	Path       string `json:"path"`
+	Format     string `json:"format"`
+	SampleRate int    `json:"sampleRate"`
+	Channels   int    `json:"channels"`
+	BitDepth   int    `json:"bitDepth"`
+	DataBytes  int    `json:"dataBytes"`
+	Message    string `json:"message"`
+}
+
 type AudioStreamStatusDTO struct {
 	Running      bool   `json:"running"`
 	FilePath     string `json:"filePath"`
