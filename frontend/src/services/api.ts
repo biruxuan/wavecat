@@ -1,0 +1,90 @@
+import type {
+  AudioStreamConfig,
+  AudioStreamStatus,
+  ConnectionConfig,
+  FilePickResult,
+  Frame,
+  SendResult,
+  Status,
+} from "../types";
+
+type AppBridge = {
+  WsConnect: (config: ConnectionConfig) => Promise<SendResult>;
+  WsDisconnect: () => Promise<SendResult>;
+  WsSendText: (message: string) => Promise<SendResult>;
+  WsSendBinaryBase64: (encoded: string) => Promise<SendResult>;
+  WsSendBinaryFile: (filePath: string) => Promise<SendResult>;
+  WsPing: () => Promise<SendResult>;
+  WsGetFrames: () => Promise<Frame[]>;
+  WsClearFrames: () => Promise<SendResult>;
+  WsStatus: () => Promise<Status>;
+  WsStartPCMStream: (config: AudioStreamConfig) => Promise<SendResult>;
+  WsStopPCMStream: () => Promise<SendResult>;
+  WsPCMStreamStatus: () => Promise<AudioStreamStatus>;
+  WsPickBinaryFile: () => Promise<FilePickResult>;
+  WsPickPCMFile: () => Promise<FilePickResult>;
+};
+
+function appBridge(): AppBridge {
+  const bridge = (window as unknown as { go?: { main?: { App?: AppBridge } } }).go?.main?.App;
+  if (!bridge) {
+    throw new Error("Wails bridge 不可用，请通过 wails dev 启动应用");
+  }
+  return bridge;
+}
+
+export async function wsConnect(config: ConnectionConfig): Promise<SendResult> {
+  return appBridge().WsConnect(config);
+}
+
+export async function wsDisconnect(): Promise<SendResult> {
+  return appBridge().WsDisconnect();
+}
+
+export async function wsSendText(message: string): Promise<SendResult> {
+  return appBridge().WsSendText(message);
+}
+
+export async function wsSendBinaryBase64(encoded: string): Promise<SendResult> {
+  return appBridge().WsSendBinaryBase64(encoded);
+}
+
+export async function wsSendBinaryFile(filePath: string): Promise<SendResult> {
+  return appBridge().WsSendBinaryFile(filePath);
+}
+
+export async function wsPing(): Promise<SendResult> {
+  return appBridge().WsPing();
+}
+
+export async function wsGetFrames(): Promise<Frame[]> {
+  return appBridge().WsGetFrames();
+}
+
+export async function wsClearFrames(): Promise<SendResult> {
+  return appBridge().WsClearFrames();
+}
+
+export async function wsStatus(): Promise<Status> {
+  return appBridge().WsStatus();
+}
+
+export async function wsStartPCMStream(config: AudioStreamConfig): Promise<SendResult> {
+  return appBridge().WsStartPCMStream(config);
+}
+
+export async function wsStopPCMStream(): Promise<SendResult> {
+  return appBridge().WsStopPCMStream();
+}
+
+export async function wsPCMStreamStatus(): Promise<AudioStreamStatus> {
+  return appBridge().WsPCMStreamStatus();
+}
+
+export async function wsPickBinaryFile(): Promise<FilePickResult> {
+  return appBridge().WsPickBinaryFile();
+}
+
+export async function wsPickPCMFile(): Promise<FilePickResult> {
+  return appBridge().WsPickPCMFile();
+}
