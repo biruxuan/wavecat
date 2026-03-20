@@ -14,21 +14,25 @@ var assets embed.FS
 func main() {
 	// Create an instance of the app structure
 	app := NewApp()
+	windowW, windowH := app.InitialWindowSize()
 
 	// Create application with options
-	err := wails.Run(&options.App{
+	appOptions := &options.App{
 		Title:  "wavecat",
-		Width:  1024,
-		Height: 768,
+		Width:  windowW,
+		Height: windowH,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
 		OnStartup:        app.startup,
+		OnShutdown:       app.shutdown,
 		Bind: []interface{}{
 			app,
 		},
-	})
+	}
+
+	err := wails.Run(appOptions)
 
 	if err != nil {
 		println("Error:", err.Error())

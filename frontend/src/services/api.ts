@@ -20,12 +20,15 @@ type AppBridge = {
   WsClearFrames: () => Promise<SendResult>;
   WsStatus: () => Promise<Status>;
   WsStartPCMStream: (config: AudioStreamConfig) => Promise<SendResult>;
+  WsStartMicStream: (config: AudioStreamConfig) => Promise<SendResult>;
+  WsSendMicChunkBase64: (encoded: string) => Promise<SendResult>;
+  WsStopMicStream: () => Promise<SendResult>;
   WsStopPCMStream: () => Promise<SendResult>;
   WsPCMStreamStatus: () => Promise<AudioStreamStatus>;
   WsPickBinaryFile: () => Promise<FilePickResult>;
   WsPickPCMFile: () => Promise<FilePickResult>;
   WsInspectAudioFile: (filePath: string) => Promise<AudioFileInfo>;
-    WsSavePCMBytes: (base64Data: string) => Promise<SendResult>;
+  WsSavePCMBytes: (base64Data: string) => Promise<SendResult>;
 };
 
 function appBridge(): AppBridge {
@@ -76,6 +79,18 @@ export async function wsStartPCMStream(config: AudioStreamConfig): Promise<SendR
   return appBridge().WsStartPCMStream(config);
 }
 
+export async function wsStartMicStream(config: AudioStreamConfig): Promise<SendResult> {
+  return appBridge().WsStartMicStream(config);
+}
+
+export async function wsSendMicChunkBase64(encoded: string): Promise<SendResult> {
+  return appBridge().WsSendMicChunkBase64(encoded);
+}
+
+export async function wsStopMicStream(): Promise<SendResult> {
+  return appBridge().WsStopMicStream();
+}
+
 export async function wsStopPCMStream(): Promise<SendResult> {
   return appBridge().WsStopPCMStream();
 }
@@ -96,6 +111,6 @@ export async function wsInspectAudioFile(filePath: string): Promise<AudioFileInf
   return appBridge().WsInspectAudioFile(filePath);
 }
 
-  export async function wsSavePCMBytes(base64Data: string): Promise<SendResult> {
-    return appBridge().WsSavePCMBytes(base64Data);
-  }
+export async function wsSavePCMBytes(base64Data: string): Promise<SendResult> {
+  return appBridge().WsSavePCMBytes(base64Data);
+}

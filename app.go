@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"wavecat/internal/audio"
@@ -23,16 +25,41 @@ type App struct {
 	frameStore *frame.Store
 	wsClient   *ws.Client
 	audio      *audio.Streamer
+	stateMu    sync.Mutex
+	windowW    int
+	windowH    int
+	windowX    int
+	windowY    int
+	hasPos     bool
+}
+
+const (
+	defaultWindowWidth  = 1024
+	defaultWindowHeight = 768
+)
+
+type windowState struct {
+	Width       int  `json:"width"`
+	Height      int  `json:"height"`
+	X           int  `json:"x"`
+	Y           int  `json:"y"`
+	HasPosition bool `json:"hasPosition"`
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	store := frame.NewStore(2000)
 	client := ws.NewClient(store)
+	state := loadWindowState()
 	return &App{
 		frameStore: store,
 		wsClient:   client,
 		audio:      audio.NewStreamer(client, store),
+		windowW:    state.Width,
+		windowH:    state.Height,
+		windowX:    state.X,
+		windowY:    state.Y,
+		hasPos:     state.HasPosition,
 	}
 }
 
@@ -40,6 +67,135 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	width, height := a.InitialWindowSize()
+	runtime.WindowSetSize(ctx, width, height)
+	if a.hasPos {
+		runtime.WindowSetPosition(ctx, a.windowX, a.windowY)
+	}
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.persistWindowState(ctx)
+			}
+		}
+	}()
+}
+
+func (a *App) shutdown(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	a.persistWindowState(ctx)
+}
+
+func (a *App) InitialWindowSize() (int, int) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
+	width := a.windowW
+	height := a.windowH
+	if width <= 0 {
+		width = defaultWindowWidth
+	}
+	if height <= 0 {
+		height = defaultWindowHeight
+	}
+	return width, height
+}
+
+func (a *App) InitialWindowPosition() (int, int, bool) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	return a.windowX, a.windowY, a.hasPos
+}
+
+func (a *App) persistWindowState(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	width, height := runtime.WindowGetSize(ctx)
+	x, y := runtime.WindowGetPosition(ctx)
+
+	a.stateMu.Lock()
+	if a.windowW == width && a.windowH == height && a.windowX == x && a.windowY == y && a.hasPos {
+		a.stateMu.Unlock()
+		return
+	}
+	a.windowW = width
+	a.windowH = height
+	a.windowX = x
+	a.windowY = y
+	a.hasPos = true
+	a.stateMu.Unlock()
+
+	_ = saveWindowState(windowState{
+		Width:       width,
+		Height:      height,
+		X:           x,
+		Y:           y,
+		HasPosition: true,
+	})
+}
+
+func loadWindowState() windowState {
+	path := windowStatePath()
+	if path == "" {
+		return windowState{Width: defaultWindowWidth, Height: defaultWindowHeight}
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return windowState{Width: defaultWindowWidth, Height: defaultWindowHeight}
+	}
+
+	var state windowState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return windowState{Width: defaultWindowWidth, Height: defaultWindowHeight}
+	}
+
+	if state.Width < 400 || state.Height < 300 {
+		state.Width = defaultWindowWidth
+		state.Height = defaultWindowHeight
+	}
+
+	return state
+}
+
+func saveWindowState(state windowState) error {
+	if state.Width < 400 || state.Height < 300 {
+		return nil
+	}
+
+	path := windowStatePath()
+	if path == "" {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, payload, 0o600)
+}
+
+func windowStatePath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil || strings.TrimSpace(configDir) == "" {
+		return ""
+	}
+	return filepath.Join(configDir, "wavecat", "window.json")
 }
 
 // Greet returns a greeting for the given name
@@ -135,6 +291,31 @@ func (a *App) WsStartPCMStream(config model.AudioStreamConfig) model.SendResult 
 		return model.SendResult{Success: false, Message: err.Error()}
 	}
 	return model.SendResult{Success: true, Message: "pcm stream started"}
+}
+
+func (a *App) WsStartMicStream(config model.AudioStreamConfig) model.SendResult {
+	if err := a.audio.StartLive(config); err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+	return model.SendResult{Success: true, Message: "microphone stream started"}
+}
+
+func (a *App) WsSendMicChunkBase64(encoded string) model.SendResult {
+	payload, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return model.SendResult{Success: false, Message: "base64 解析失败"}
+	}
+
+	if err = a.audio.SendLiveChunk(payload); err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+
+	return model.SendResult{Success: true, Message: "mic chunk sent"}
+}
+
+func (a *App) WsStopMicStream() model.SendResult {
+	a.audio.Stop()
+	return model.SendResult{Success: true, Message: "microphone stream stopped"}
 }
 
 func (a *App) WsStopPCMStream() model.SendResult {

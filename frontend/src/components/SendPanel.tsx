@@ -25,6 +25,10 @@ type Props = {
   connected: boolean;
   sessionProfile: SessionProfileType;
   streamStatus: AudioStreamStatus;
+  micStreaming: boolean;
+  micInputLevel: number;
+  micWaveform: number[];
+  playbackWaveform: number[];
   audioFileInfo?: AudioFileInfo;
   translationFromLanguage: string;
   translationToLanguagesText: string;
@@ -59,6 +63,8 @@ type Props = {
   onRunSession: () => void;
   onStartStream: () => void;
   onStopStream: () => void;
+  onStartMicStream: () => void;
+  onStopMicStream: () => void;
   onScrollCollapse?: (collapsed: boolean) => void;
   scrollExpandPreset: ScrollExpandPreset;
 };
@@ -79,6 +85,10 @@ export function SendPanel({
   connected,
   sessionProfile,
   streamStatus,
+  micStreaming,
+  micInputLevel,
+  micWaveform,
+  playbackWaveform,
   audioFileInfo,
   translationFromLanguage,
   translationToLanguagesText,
@@ -113,6 +123,8 @@ export function SendPanel({
   onRunSession,
   onStartStream,
   onStopStream,
+  onStartMicStream,
+  onStopMicStream,
   onScrollCollapse,
   scrollExpandPreset,
 }: Props) {
@@ -191,7 +203,7 @@ export function SendPanel({
       case "packet_len":
         return { name: "packet_len", type: "uint16", length: 2, endian: "big", defaultValue: "0", rule: "packet_len" };
       case "stream_id":
-        return { name: "stream_id", type: "uint8", length: 1, endian: "big", defaultValue: "1", rule: "default" };
+        return { name: "stream_id", type: "uint8", length: 1, endian: "big", defaultValue: "6", rule: "default" };
       case "type":
         return { name: "type", type: "uint8", length: 1, endian: "big", defaultValue: "1", rule: "default" };
       default:
@@ -226,6 +238,53 @@ export function SendPanel({
 
   const previewTimestamp = Date.now();
   const previewHeaderLength = headerRules.reduce((sum, rule) => sum + (rule.length || 0), 0);
+  const normalizedMicLevel = Math.max(0, Math.min(1, micInputLevel || 0));
+  const micLevelPercent = Math.round(normalizedMicLevel * 100);
+  const micLevelBars = "▁▂▃▄▅▆▇█";
+  const micLevelBarIndex = Math.max(0, Math.min(micLevelBars.length - 1, Math.floor(normalizedMicLevel * (micLevelBars.length - 1))));
+  const micLevelBar = micLevelBars[micLevelBarIndex];
+  const recentMicWindow = micWaveform.slice(-24);
+  const recentMicPeak = recentMicWindow.length > 0 ? Math.max(...recentMicWindow) : 0;
+  const micVoiceThreshold = 0.035;
+  const micVoiceActive = micStreaming && recentMicPeak >= micVoiceThreshold;
+  const micVoiceLabel = !micStreaming ? "idle" : micVoiceActive ? "有声" : "静音";
+  const micVoiceDot = !micStreaming ? "⚪" : micVoiceActive ? "🟢" : "🟡";
+
+  const renderWaveform = (points: number[], width = 320, height = 64) => {
+    if (points.length === 0) {
+      return (
+        <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="empty waveform">
+          <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
+          <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
+        </svg>
+      );
+    }
+
+    const stepX = points.length > 1 ? width / (points.length - 1) : width;
+    const polyline = points
+      .map((value, index) => {
+        const x = stepX * index;
+        const normalized = Math.max(0, Math.min(1, value || 0));
+        const y = height - normalized * (height - 4) - 2;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+
+    return (
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="waveform">
+        <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
+        <line x1="0" y1={height - 2} x2={width} y2={height - 2} stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
+        <polyline
+          points={polyline}
+          fill="none"
+          stroke="rgba(74,222,128,0.9)"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  };
   const headerPreviewHex = headerRules
     .flatMap((rule) => {
       const fieldType = (rule.type || "uint").toLowerCase();
@@ -580,6 +639,14 @@ export function SendPanel({
         Stream status: {streamStatus.running ? "running" : "idle"} | sent frames: {streamStatus.sentFrames} | sent bytes: {streamStatus.sentBytes}
         {streamStatus.finishReason ? ` | reason: ${streamStatus.finishReason}` : ""}
       </div>
+      <div className="status-text">Microphone stream: {micStreaming ? "running" : "idle"}</div>
+      <div className="status-text">Microphone source: web (getUserMedia)</div>
+      <div className="status-text">Mic Voice Threshold: {micVoiceDot} {micVoiceLabel} (peak {recentMicPeak.toFixed(3)} / th {micVoiceThreshold.toFixed(3)})</div>
+      <div className="status-text">Microphone input level: {micLevelPercent}% {micLevelBar}</div>
+      <div className="status-text">Microphone waveform</div>
+      {renderWaveform(micWaveform)}
+      <div className="status-text">Playback waveform</div>
+      {renderWaveform(playbackWaveform)}
       {streamStatus.lastError ? <div className="error-box">{streamStatus.lastError}</div> : null}
 
       <div className="button-row">
@@ -594,6 +661,12 @@ export function SendPanel({
         </button>
         <button disabled={!streaming} onClick={onStopStream}>
           Stop PCM Stream
+        </button>
+        <button disabled={!connected || streaming || micStreaming || validationErrors.length > 0 || bitDepth !== 16} onClick={onStartMicStream}>
+          Start Mic Stream
+        </button>
+        <button disabled={!micStreaming} onClick={onStopMicStream}>
+          Stop Mic Stream
         </button>
       </div>
     </section>

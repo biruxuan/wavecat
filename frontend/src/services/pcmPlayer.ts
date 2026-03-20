@@ -26,12 +26,20 @@ export class RealTimePCMPlayer {
   private queuedDurationSec = 0;
   private nextPlaybackTime = 0;
   private scheduledSources = 0;
-  private maxScheduledSources = 2;
+  private maxScheduledSources = 4;
   private minStartBufferedSec = 0.12;
   private maxQueueLength = 0;
   private previousLastSamples: number[] = [];
   private pendingBytes = new Uint8Array(0);
   private lastFormatKey = "";
+  private boundaryCrossfadeMs = 0;
+  private adaptiveRateEnabled = true;
+  private adaptiveRateMin = 0.985;
+  private adaptiveRateMax = 1.015;
+  private adaptiveTargetQueueSec = 0.24;
+  private adaptiveDeadbandSec = 0.08;
+  private adaptiveRateStrength = 1;
+  private activeSources = new Set<AudioBufferSourceNode>();
 
   setMaxScheduledSources(value: number) {
     const next = Number.isFinite(value) ? Math.floor(value) : 2;
@@ -51,9 +59,30 @@ export class RealTimePCMPlayer {
     }
   }
 
-  private ensureContext() {
+  setBoundaryCrossfadeMs(value: number) {
+    const next = Number.isFinite(value) ? value : 4;
+    this.boundaryCrossfadeMs = Math.max(0, Math.min(12, next));
+  }
+
+  setAdaptiveRateEnabled(value: boolean) {
+    this.adaptiveRateEnabled = !!value;
+  }
+
+  setAdaptiveRateStrength(value: number) {
+    const next = Number.isFinite(value) ? value : 1;
+    this.adaptiveRateStrength = Math.max(0, Math.min(2, next));
+  }
+
+  private ensureContext(targetSampleRate?: number) {
+    if (this.audioContext && targetSampleRate && this.audioContext.sampleRate !== targetSampleRate) {
+      this.stopNow();
+      this.audioContext.close().catch(() => {});
+      this.audioContext = null;
+    }
     if (!this.audioContext) {
-      this.audioContext = new AudioContext();
+      this.audioContext = new AudioContext(
+        targetSampleRate ? { sampleRate: targetSampleRate } : undefined
+      );
       this.nextPlaybackTime = this.audioContext.currentTime;
     }
     return this.audioContext;
@@ -72,23 +101,19 @@ export class RealTimePCMPlayer {
       return null;
     }
 
-    const context = this.ensureContext();
-    if (context.state === "suspended") {
-      await context.resume();
-    }
-
     const channelCount = Math.max(1, channels || 1);
     const bytesPerSample = 2;
     const bytesPerFrame = bytesPerSample * channelCount;
     const resolvedSampleRate = Math.max(8000, sampleRate || 16000);
+
+    const context = this.ensureContext(resolvedSampleRate);
+    if (context.state === "suspended") {
+      await context.resume();
+    }
     const formatKey = `${resolvedSampleRate}/${channelCount}`;
 
     if (this.lastFormatKey && this.lastFormatKey !== formatKey) {
-      this.pendingBytes = new Uint8Array(0);
-      this.previousLastSamples = [];
-      this.queue = [];
-      this.queuedDurationSec = 0;
-      this.scheduledSources = 0;
+      this.stopNow();
     }
     this.lastFormatKey = formatKey;
 
@@ -120,7 +145,13 @@ export class RealTimePCMPlayer {
     let peak = 0;
     let sampleCounter = 0;
     let maxBoundaryJump = 0;
-    const appliedSmoothingMs = 0;
+    let appliedSmoothingMs = 0;
+
+    const requestedFadeSamples = Math.floor((resolvedSampleRate * this.boundaryCrossfadeMs) / 1000);
+    const fadeSamples = Math.max(0, Math.min(requestedFadeSamples, Math.floor(frameCount / 2)));
+    if (fadeSamples > 0) {
+      appliedSmoothingMs = (fadeSamples * 1000) / resolvedSampleRate;
+    }
 
     for (let channel = 0; channel < channelCount; channel += 1) {
       const output = audioBuffer.getChannelData(channel);
@@ -141,7 +172,23 @@ export class RealTimePCMPlayer {
       }
 
       if (typeof previousLastSample === "number" && frameCount > 0) {
+        const rawBoundaryJump = Math.abs(previousLastSample - output[0]);
+        if (fadeSamples > 0) {
+          for (let i = 0; i < fadeSamples; i += 1) {
+            const ratio = (i + 1) / (fadeSamples + 1);
+            output[i] = previousLastSample * (1 - ratio) + output[i] * ratio;
+          }
+        }
         const boundaryJump = Math.abs(previousLastSample - output[0]);
+        maxBoundaryJump = Math.max(maxBoundaryJump, Math.min(rawBoundaryJump, boundaryJump));
+      } else if (frameCount > 0) {
+        if (fadeSamples > 0) {
+          for (let i = 0; i < fadeSamples; i += 1) {
+            const ratio = (i + 1) / (fadeSamples + 1);
+            output[i] = output[i] * ratio;
+          }
+        }
+        const boundaryJump = Math.abs(output[0]);
         maxBoundaryJump = Math.max(maxBoundaryJump, boundaryJump);
       }
 
@@ -185,6 +232,32 @@ export class RealTimePCMPlayer {
     };
   }
 
+  stopNow() {
+    for (const source of this.activeSources) {
+      try {
+        source.onended = null;
+        source.stop();
+        source.disconnect();
+      } catch {
+        // ignore stop/disconnect errors
+      }
+    }
+    this.activeSources.clear();
+
+    this.queue = [];
+    this.pendingBytes = new Uint8Array(0);
+    this.previousLastSamples = [];
+    this.queuedDurationSec = 0;
+    this.scheduledSources = 0;
+    this.lastFormatKey = "";
+
+    if (this.audioContext) {
+      this.nextPlaybackTime = this.audioContext.currentTime;
+    } else {
+      this.nextPlaybackTime = 0;
+    }
+  }
+
   private async scheduleQueuedBuffers() {
     const context = this.ensureContext();
     if (context.state === "suspended") {
@@ -197,9 +270,11 @@ export class RealTimePCMPlayer {
       return;
     }
 
-    if (this.scheduledSources === 0 && (this.nextPlaybackTime < now-0.15 || this.nextPlaybackTime > now + 1)) {
-      this.nextPlaybackTime = now + 0.02;
+    if (this.scheduledSources === 0 && (this.nextPlaybackTime < now - 0.15 || this.nextPlaybackTime > now + 1)) {
+      this.nextPlaybackTime = now + 0.005;
     }
+
+    const batchRate = this.resolveAdaptivePlaybackRate();
 
     while (this.scheduledSources < this.maxScheduledSources && this.queue.length > 0) {
       const next = this.queue.shift();
@@ -212,22 +287,44 @@ export class RealTimePCMPlayer {
 
       const source = context.createBufferSource();
       source.buffer = next.buffer;
+      source.playbackRate.value = batchRate;
       source.connect(context.destination);
 
-      const playAt = Math.max(context.currentTime + 0.02, this.nextPlaybackTime);
+      const playAt = Math.max(context.currentTime + 0.005, this.nextPlaybackTime);
       source.start(playAt);
-      this.nextPlaybackTime = playAt + next.buffer.duration;
+      this.nextPlaybackTime = playAt + next.buffer.duration / source.playbackRate.value;
       this.scheduledSources += 1;
+      this.activeSources.add(source);
 
       source.onended = () => {
+        this.activeSources.delete(source);
         this.scheduledSources = Math.max(0, this.scheduledSources - 1);
         if (this.scheduledSources === 0 && this.queue.length === 0) {
-          this.nextPlaybackTime = context.currentTime;
           this.queuedDurationSec = 0;
+          this.previousLastSamples = [];
         }
         void this.scheduleQueuedBuffers();
       };
     }
+  }
+
+  private resolveAdaptivePlaybackRate() {
+    if (!this.adaptiveRateEnabled) {
+      return 1;
+    }
+
+    const delta = this.queuedDurationSec - this.adaptiveTargetQueueSec;
+    if (Math.abs(delta) <= this.adaptiveDeadbandSec) {
+      return 1;
+    }
+
+    const normalized = Math.max(-1, Math.min(1, delta / Math.max(0.001, this.adaptiveTargetQueueSec)));
+    const baseStep = 0.005 * this.adaptiveRateStrength;
+    const rate = 1 + normalized * baseStep;
+    const dynamicMin = Math.max(0.985, 1 - baseStep);
+    const dynamicMax = Math.min(1.015, 1 + baseStep);
+    const clampedByDynamic = Math.max(dynamicMin, Math.min(dynamicMax, rate));
+    return Math.max(this.adaptiveRateMin, Math.min(this.adaptiveRateMax, clampedByDynamic));
   }
 
   private base64ToBytes(base64: string) {

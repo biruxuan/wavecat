@@ -5,6 +5,7 @@ import { FrameDetail } from "./components/FrameDetail";
 import { FrameList } from "./components/FrameList";
 import { ResponsePanel } from "./components/ResponsePanel";
 import { SendPanel } from "./components/SendPanel";
+import { useMicStream } from "./hooks/useMicStream";
 import { RealTimePCMPlayer, type PCMChunkDiagnostics } from "./services/pcmPlayer";
 import {
     wsClearFrames,
@@ -22,7 +23,7 @@ import {
     wsStartPCMStream,
     wsStopPCMStream,
     wsStatus,
-        wsSavePCMBytes,
+    wsSavePCMBytes,
 } from "./services/api";
 import type { AudioFileInfo, AudioHeaderFieldRule, AudioStreamStatus, Frame, SessionProfileType, SessionSummary } from "./types";
 
@@ -31,7 +32,7 @@ function App() {
         { name: "magic", type: "uint16", length: 2, endian: "big", defaultValue: "43605", rule: "default" },
         { name: "version", type: "uint8", length: 1, endian: "big", defaultValue: "1", rule: "default" },
         { name: "chunk_type", type: "uint8", length: 1, endian: "big", defaultValue: "2", rule: "default" },
-        { name: "stream_id", type: "uint16", length: 2, endian: "big", defaultValue: "21", rule: "default" },
+        { name: "stream_id", type: "uint16", length: 2, endian: "big", defaultValue: "6", rule: "default" },
         { name: "seq", type: "uint32", length: 4, endian: "big", defaultValue: "0", rule: "seq" },
         { name: "payload_len", type: "uint16", length: 2, endian: "big", defaultValue: "0", rule: "payload_len" },
     ];
@@ -90,8 +91,8 @@ function App() {
     const [audioParamSource, setAudioParamSource] = useState("Mini Translation preset");
     const [headerConfigSource, setHeaderConfigSource] = useState("Mini Translation preset");
     const [jsonVariableContext, setJSONVariableContext] = useState({
-        conversationId: "",
-        streamId: 21,
+        conversationId: "test",
+        streamId: 6,
     });
     const [headerRules, setHeaderRules] = useState(miniTranslationHeaderPreset);
     const [headerTemplates, setHeaderTemplates] = useState<
@@ -115,8 +116,11 @@ function App() {
     const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
     const [serverPCMSampleRate, setServerPCMSampleRate] = useState(16000);
     const [serverPCMChannels, setServerPCMChannels] = useState(1);
-    const [serverPCMMaxScheduledSources, setServerPCMMaxScheduledSources] = useState(2);
+    const [serverPCMMaxScheduledSources, setServerPCMMaxScheduledSources] = useState(10);
     const [serverPCMMinStartBufferMs, setServerPCMMinStartBufferMs] = useState(120);
+    const [serverPCMCrossfadeMs, setServerPCMCrossfadeMs] = useState(0);
+    const [serverPCMAdaptiveRateEnabled, setServerPCMAdaptiveRateEnabled] = useState(true);
+    const [serverPCMAdaptiveRateStrength, setServerPCMAdaptiveRateStrength] = useState(1);
     const [serverPCMPlaying, setServerPCMPlaying] = useState(false);
     const [serverPCMPlayedChunks, setServerPCMPlayedChunks] = useState(0);
     const [audioProbe, setAudioProbe] = useState({
@@ -157,6 +161,7 @@ function App() {
     const formatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const sessionRunnerRef = useRef(false);
     const sessionStatusRef = useRef("");
+    const statusPinnedRef = useRef(false);
     const settingsRef = useRef<HTMLDivElement | null>(null);
     const [liveAssistantText, setLiveAssistantText] = useState("");
     const pcmPlayerRef = useRef<RealTimePCMPlayer | null>(null);
@@ -170,6 +175,7 @@ function App() {
     const lastProcessedTextFrameIdRef = useRef(0);
     const playbackPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const streamedAudioOperationIdsRef = useRef<Set<string>>(new Set());
+    const [playbackWaveform, setPlaybackWaveform] = useState<number[]>([]);
 
     const cloneMiniTranslationHeaderPreset = () =>
         miniTranslationHeaderPreset.map((rule) => ({ ...rule }));
@@ -223,10 +229,42 @@ function App() {
 }`;
     };
 
-    const updateStatus = (message: string) => {
+    const updateStatus = (message: string, options?: { pin?: boolean; force?: boolean }) => {
+        if (statusPinnedRef.current && !options?.force && !options?.pin) {
+            return;
+        }
+        if (options?.pin) {
+            statusPinnedRef.current = true;
+        }
         lastStatusRef.current = message;
         setStatusText(message);
     };
+
+    const clearPinnedStatus = () => {
+        statusPinnedRef.current = false;
+    };
+
+    const {
+        micStreaming,
+        micInputLevel,
+        micWaveform,
+        setMicStreaming,
+        resetMicVisuals,
+        releaseMicCapture,
+        handleStartMicStream,
+        handleStopMicStream,
+    } = useMicStream({
+        connected,
+        streaming,
+        sampleRate,
+        channels,
+        bitDepth,
+        frameMs,
+        seqStart,
+        headerRules,
+        setStreaming,
+        updateStatus,
+    });
 
     const clearPendingResponse = () => {
         pendingResponseRef.current = false;
@@ -435,6 +473,9 @@ function App() {
         const player = new RealTimePCMPlayer();
         player.setMaxScheduledSources(serverPCMMaxScheduledSources);
         player.setMinStartBufferedMs(serverPCMMinStartBufferMs);
+        player.setBoundaryCrossfadeMs(serverPCMCrossfadeMs);
+        player.setAdaptiveRateEnabled(serverPCMAdaptiveRateEnabled);
+        player.setAdaptiveRateStrength(serverPCMAdaptiveRateStrength);
         player.onRawBytes = (bytes) => {
             if (pcmRecordingRef.current) {
                 pcmRecordingRef.current.push(bytes);
@@ -460,6 +501,11 @@ function App() {
                 const next = [...prev, entry];
                 return next.length > 60 ? next.slice(next.length - 60) : next;
             });
+            const playbackValue = Math.max(0, Math.min(1, Math.max(diag.rms, diag.peak * 0.75)));
+            setPlaybackWaveform((prev) => {
+                const next = [...prev, playbackValue];
+                return next.length > 180 ? next.slice(next.length - 180) : next;
+            });
         };
         return player;
     };
@@ -468,12 +514,61 @@ function App() {
         if (pcmPlayerRef.current) {
             pcmPlayerRef.current.setMaxScheduledSources(serverPCMMaxScheduledSources);
             pcmPlayerRef.current.setMinStartBufferedMs(serverPCMMinStartBufferMs);
+            pcmPlayerRef.current.setBoundaryCrossfadeMs(serverPCMCrossfadeMs);
+            pcmPlayerRef.current.setAdaptiveRateEnabled(serverPCMAdaptiveRateEnabled);
+            pcmPlayerRef.current.setAdaptiveRateStrength(serverPCMAdaptiveRateStrength);
         }
-    }, [serverPCMMaxScheduledSources, serverPCMMinStartBufferMs]);
+    }, [
+        serverPCMMaxScheduledSources,
+        serverPCMMinStartBufferMs,
+        serverPCMCrossfadeMs,
+        serverPCMAdaptiveRateEnabled,
+        serverPCMAdaptiveRateStrength,
+    ]);
+
+    useEffect(() => {
+        const clearPinnedOnClick = (event: MouseEvent) => {
+            if (!statusPinnedRef.current) {
+                return;
+            }
+
+            const selected = window.getSelection()?.toString().trim() ?? "";
+            if (selected.length > 0) {
+                return;
+            }
+
+            const target = event.target;
+            if (target instanceof Element) {
+                if (target.closest(".status-text")) {
+                    return;
+                }
+            }
+
+            clearPinnedStatus();
+        };
+
+        document.addEventListener("click", clearPinnedOnClick);
+        return () => {
+            document.removeEventListener("click", clearPinnedOnClick);
+        };
+    }, []);
 
     const handleToggleAutoPlayServerPCM = async (nextEnabled: boolean) => {
         setAutoPlayServerPCM(nextEnabled);
         if (!nextEnabled) {
+            const player = pcmPlayerRef.current;
+            if (player) {
+                player.stopNow();
+                setServerPCMPlaying(false);
+                setPlaybackWaveform([]);
+                const playbackState = player.getPlaybackState();
+                setAudioProbe((prev) => ({
+                    ...prev,
+                    queueLength: playbackState.queueLength,
+                    scheduledSources: playbackState.scheduledSources,
+                    lastReason: "autoplay_off",
+                }));
+            }
             return;
         }
         if (!pcmPlayerRef.current) {
@@ -484,6 +579,24 @@ function App() {
         } catch {
             updateStatus("audio playback may be blocked by system policy; click speaker again after interaction");
         }
+    };
+
+    const handleAbortPlayback = () => {
+        const player = pcmPlayerRef.current;
+        if (!player) {
+            return;
+        }
+        player.stopNow();
+        setServerPCMPlaying(false);
+        setPlaybackWaveform([]);
+        const playbackState = player.getPlaybackState();
+        setAudioProbe((prev) => ({
+            ...prev,
+            queueLength: playbackState.queueLength,
+            scheduledSources: playbackState.scheduledSources,
+            lastReason: "manual_stop",
+        }));
+        updateStatus("playback aborted");
     };
 
     const playInboundAudioChunks = async (nextFrames: Frame[]) => {
@@ -666,6 +779,23 @@ function App() {
                 const normalized = Math.max(40, Math.min(400, Math.floor(rawServerPCMMinStartBufferMs)));
                 setServerPCMMinStartBufferMs(normalized);
             }
+
+            const rawServerPCMCrossfadeMs = Number(window.localStorage.getItem("wavecat.serverPCMCrossfadeMs"));
+            if (Number.isFinite(rawServerPCMCrossfadeMs)) {
+                const normalized = Math.max(0, Math.min(12, rawServerPCMCrossfadeMs));
+                setServerPCMCrossfadeMs(normalized);
+            }
+
+            const rawServerPCMAdaptiveRateEnabled = window.localStorage.getItem("wavecat.serverPCMAdaptiveRateEnabled");
+            if (rawServerPCMAdaptiveRateEnabled === "true" || rawServerPCMAdaptiveRateEnabled === "false") {
+                setServerPCMAdaptiveRateEnabled(rawServerPCMAdaptiveRateEnabled === "true");
+            }
+
+            const rawServerPCMAdaptiveRateStrength = Number(window.localStorage.getItem("wavecat.serverPCMAdaptiveRateStrength"));
+            if (Number.isFinite(rawServerPCMAdaptiveRateStrength)) {
+                const normalized = Math.max(0, Math.min(2, rawServerPCMAdaptiveRateStrength));
+                setServerPCMAdaptiveRateStrength(normalized);
+            }
         } catch {
             // ignore localStorage parse errors
         }
@@ -689,6 +819,7 @@ function App() {
 
                 setStreamStatus(nextStreamStatus);
                 setStreaming(nextStreamStatus.running);
+                setMicStreaming(nextStreamStatus.running && nextStreamStatus.filePath === "[microphone]");
                 if (pcmPlayerRef.current) {
                     const playbackState = pcmPlayerRef.current.getPlaybackState();
                     setAudioProbe((prev) => ({
@@ -704,6 +835,8 @@ function App() {
                 });
                 if (nextStatus.state !== "connected") {
                     setStreaming(false);
+                    setMicStreaming(false);
+                    resetMicVisuals();
                     clearPendingResponse();
                     if (!sessionRunnerRef.current && lastStatusRef.current !== statusLabel) {
                         updateStatus(statusLabel);
@@ -717,9 +850,6 @@ function App() {
                     setFrames(nextFrames);
                     await playInboundAudioChunks(nextFrames);
                     processInboundTextChunks(nextFrames);
-                    if (last?.id) {
-                        setSelectedId((prev) => prev ?? last.id);
-                    }
 
                     if (pendingResponseRef.current) {
                         const latestIncoming = [...nextFrames]
@@ -728,7 +858,6 @@ function App() {
                         if (latestIncoming) {
                             clearPendingResponse();
                             updateStatus("response received");
-                            setSelectedId(latestIncoming.id);
                         }
                     }
                 }
@@ -743,6 +872,7 @@ function App() {
         return () => {
             window.clearInterval(timer);
             clearPendingResponse();
+            void releaseMicCapture();
         };
     }, []);
 
@@ -769,6 +899,18 @@ function App() {
     useEffect(() => {
         window.localStorage.setItem("wavecat.serverPCMMinStartBufferMs", String(serverPCMMinStartBufferMs));
     }, [serverPCMMinStartBufferMs]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMCrossfadeMs", String(serverPCMCrossfadeMs));
+    }, [serverPCMCrossfadeMs]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMAdaptiveRateEnabled", String(serverPCMAdaptiveRateEnabled));
+    }, [serverPCMAdaptiveRateEnabled]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.serverPCMAdaptiveRateStrength", String(serverPCMAdaptiveRateStrength));
+    }, [serverPCMAdaptiveRateStrength]);
 
     useEffect(() => {
         const draft: LastDraftConfig = {
@@ -922,9 +1064,6 @@ function App() {
         const nextFrames = await wsGetFrames();
         setFrames(nextFrames);
         const last = nextFrames[nextFrames.length - 1];
-        if (last?.id) {
-            setSelectedId(last.id);
-        }
         const frameSig = `${nextFrames.length}:${last?.id ?? 0}:${last?.timestamp ?? 0}`;
         lastFrameSigRef.current = frameSig;
         return { nextFrames, last };
@@ -977,9 +1116,12 @@ function App() {
 
     const handleDisconnect = async () => {
         const result = await wsDisconnect();
+        await releaseMicCapture();
         clearPendingResponse();
         updateStatus(result.message);
         setStreaming(false);
+        resetMicVisuals();
+        setPlaybackWaveform([]);
         lastPlayedInboundFrameIdRef.current = 0;
         lastProcessedTextFrameIdRef.current = 0;
         setLiveAssistantText("");
@@ -995,6 +1137,8 @@ function App() {
     const handleClear = async () => {
         await wsClearFrames();
         setSelectedId(null);
+        resetMicVisuals();
+        setPlaybackWaveform([]);
         lastPlayedInboundFrameIdRef.current = 0;
         lastProcessedTextFrameIdRef.current = 0;
         setLiveAssistantText("");
@@ -1004,8 +1148,8 @@ function App() {
 
     const applyJSONVariables = (raw: string) => {
         const now = Date.now();
-        const conversationId = jsonVariableContext.conversationId || `conv-${now}`;
-        const streamId = jsonVariableContext.streamId || 21;
+        const conversationId = jsonVariableContext.conversationId || "test";
+        const streamId = jsonVariableContext.streamId || 6;
         const operationId = `op-${now}`;
         const messageId = `msg-${now}`;
         const replaced = raw
@@ -1292,12 +1436,8 @@ function App() {
                 );
             const last = nextFrames[nextFrames.length - 1];
             setFrames(nextFrames);
-            if (last?.id) {
-                setSelectedId(last.id);
-            }
             onPoll?.(nextFrames);
             if (matched) {
-                setSelectedId(matched.id);
                 return matched;
             }
             await new Promise((resolve) => window.setTimeout(resolve, 300));
@@ -1705,46 +1845,17 @@ function App() {
                 extractedAudioBytes,
                 error: "",
             });
-
-            const closeSnapshot = await wsGetFrames();
-            const closeAfterId = closeSnapshot[closeSnapshot.length - 1]?.id ?? 0;
-            const closeTemplate = buildSessionTemplate(sessionConfig.profileType, "close");
-            const injectedClosePayload = applyJSONVariables(closeTemplate);
-            const closePayload = tryFormatJSON(injectedClosePayload) ?? injectedClosePayload;
-            const closeResult = await wsSendText(closePayload);
-            if (!closeResult.success) {
-                throw new Error(closeResult.message);
-            }
-
-            updateStatus(`waiting ${sessionConfig.profileType}/session_finished...`);
-            setSessionSummary({
-                profileType: sessionConfig.profileType,
-                status: "closing",
-                startedFrame,
-                finalFrame,
-                extractedText,
-                extractedAudioChunks,
-                extractedAudioBytes,
-                error: "",
-            });
-            const sessionFinishedFrame = await waitForInboundEvent(
-                (text) => matchesSessionEvent(text, sessionConfig.profileType, ["session_finished", "closed", "close_session_ack"]),
-                15000,
-                closeAfterId
-            );
-
             setSessionSummary({
                 profileType: sessionConfig.profileType,
                 status: "completed",
                 startedFrame,
                 finalFrame,
-                sessionFinishedFrame,
                 extractedText,
                 extractedAudioChunks,
                 extractedAudioBytes,
                 error: "",
             });
-            updateStatus(`${sessionConfig.profileType} session completed`);
+            updateStatus(`${sessionConfig.profileType} final received（manual close）`);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             setSessionSummary((prev) => ({
@@ -1758,7 +1869,6 @@ function App() {
                     await wsStopPCMStream();
                 }
             } catch {
-                // ignore cleanup errors
             }
             setStreaming(false);
             updateStatus(message);
@@ -1803,7 +1913,12 @@ function App() {
             const message = error instanceof Error ? error.message : String(error);
             updateStatus(message);
         } finally {
+            if (micStreaming) {
+                await releaseMicCapture();
+            }
+            setMicStreaming(false);
             setStreaming(false);
+            resetMicVisuals();
         }
     };
 
@@ -1865,6 +1980,16 @@ function App() {
                         {audioProbe.queueLength > 0 || audioProbe.scheduledSources > 0 ? ` · q ${audioProbe.queueLength}/${audioProbe.scheduledSources}` : ""}
                         {audioProbe.skipped > 0 ? ` · skip ${audioProbe.skipped}` : ""}
                         {audioProbe.failed > 0 ? ` · fail ${audioProbe.failed}` : ""}
+                    </button>
+                    <button
+                        type="button"
+                        className="audio-probe-mini bad"
+                        onClick={handleAbortPlayback}
+                        disabled={!autoPlayServerPCM || (audioProbe.queueLength === 0 && audioProbe.scheduledSources === 0)}
+                        title="Abort current audio playback"
+                        aria-label="Abort current audio playback"
+                    >
+                        ⏹ stop audio
                     </button>
                     {probeDetailsOpen ? (
                         <div className="probe-popover">
@@ -2039,11 +2164,11 @@ function App() {
                                     value={String(serverPCMMaxScheduledSources)}
                                     onChange={(event) => {
                                         const next = Number(event.target.value);
-                                        setServerPCMMaxScheduledSources(Number.isFinite(next) ? Math.max(1, Math.min(10, Math.floor(next))) : 2);
+                                        setServerPCMMaxScheduledSources(Number.isFinite(next) ? Math.max(1, Math.min(10, Math.floor(next))) : 10);
                                     }}
                                 >
                                     <option value="1">Strict Serial (1)</option>
-                                    <option value="2">1-ahead (2, recommended)</option>
+                                    <option value="2">1-ahead (2)</option>
                                     <option value="3">2-ahead (3)</option>
                                     <option value="4">3-ahead (4)</option>
                                     <option value="5">4-ahead (5)</option>
@@ -2051,7 +2176,7 @@ function App() {
                                     <option value="7">6-ahead (7)</option>
                                     <option value="8">7-ahead (8)</option>
                                     <option value="9">8-ahead (9)</option>
-                                    <option value="10">9-ahead (10)</option>
+                                    <option value="10">9-ahead (10, recommended)</option>
                                 </select>
                             </label>
                             <label className="field">
@@ -2067,7 +2192,47 @@ function App() {
                                     <option value="120">120 ms (balanced)</option>
                                     <option value="180">180 ms (stable)</option>
                                     <option value="240">240 ms (very stable)</option>
+                                    <option value="400">400 ms (max delay, most stable)</option>
                                 </select>
+                            </label>
+                            <label className="field">
+                                <span>Chunk Crossfade: {serverPCMCrossfadeMs.toFixed(1)} ms</span>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={12}
+                                    step={0.5}
+                                    value={serverPCMCrossfadeMs}
+                                    onChange={(event) => {
+                                        const next = Number(event.target.value);
+                                        setServerPCMCrossfadeMs(Number.isFinite(next) ? Math.max(0, Math.min(12, next)) : 4);
+                                    }}
+                                />
+                            </label>
+                            <label className="field">
+                                <span className="checkbox-row">
+                                    <input
+                                        type="checkbox"
+                                        checked={serverPCMAdaptiveRateEnabled}
+                                        onChange={(event) => setServerPCMAdaptiveRateEnabled(event.target.checked)}
+                                    />
+                                    Adaptive Playback Rate
+                                </span>
+                            </label>
+                            <label className="field">
+                                <span>Adaptive Rate Strength: {serverPCMAdaptiveRateStrength.toFixed(2)}x</span>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={2}
+                                    step={0.1}
+                                    value={serverPCMAdaptiveRateStrength}
+                                    disabled={!serverPCMAdaptiveRateEnabled}
+                                    onChange={(event) => {
+                                        const next = Number(event.target.value);
+                                        setServerPCMAdaptiveRateStrength(Number.isFinite(next) ? Math.max(0, Math.min(2, next)) : 1);
+                                    }}
+                                />
                             </label>
                             <div className="audio-probe-block">
                                 <div className="audio-probe-title">Audio Probe</div>
@@ -2129,6 +2294,10 @@ function App() {
                         connected={connected}
                         sessionProfile={sessionProfile}
                         streamStatus={streamStatus}
+                        micStreaming={micStreaming}
+                        micInputLevel={micInputLevel}
+                        micWaveform={micWaveform}
+                        playbackWaveform={playbackWaveform}
                         audioFileInfo={audioFileInfo}
                         translationFromLanguage={translationFromLanguage}
                         translationToLanguagesText={translationToLanguagesText}
@@ -2197,6 +2366,8 @@ function App() {
                         onRunSession={handleRunSession}
                         onStartStream={handleStartStream}
                         onStopStream={handleStopStream}
+                        onStartMicStream={handleStartMicStream}
+                        onStopMicStream={handleStopMicStream}
                         onScrollCollapse={(collapsed) => setConnectionPanelCollapsed(collapsed)}
                         scrollExpandPreset={scrollExpandPreset}
                     />

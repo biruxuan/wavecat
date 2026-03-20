@@ -27,6 +27,7 @@ type Streamer struct {
 	frameBytes   int
 	frameMs      int
 	seqStart     int
+	headerRules  []model.AudioHeaderFieldRule
 	sentFrames   int
 	sentBytes    int
 	lastError    string
@@ -68,6 +69,7 @@ func (s *Streamer) Start(config model.AudioStreamConfig) error {
 	s.frameBytes = frameBytes
 	s.frameMs = cfg.FrameMs
 	s.seqStart = cfg.SeqStart
+	s.headerRules = cfg.HeaderRules
 	s.sentFrames = 0
 	s.sentBytes = 0
 	s.lastError = ""
@@ -97,6 +99,73 @@ func (s *Streamer) Stop() {
 	if stopCh != nil {
 		close(stopCh)
 	}
+}
+
+func (s *Streamer) StartLive(config model.AudioStreamConfig) error {
+	frameBytes, cfg, err := normalizeLiveConfig(config)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return fmt.Errorf("PCM 流正在发送中")
+	}
+	stopCh := make(chan struct{})
+	s.running = true
+	s.stopCh = stopCh
+	s.filePath = "[microphone]"
+	s.frameBytes = frameBytes
+	s.frameMs = cfg.FrameMs
+	s.seqStart = cfg.SeqStart
+	s.headerRules = cfg.HeaderRules
+	s.sentFrames = 0
+	s.sentBytes = 0
+	s.lastError = ""
+	s.finishReason = ""
+	s.mu.Unlock()
+
+	s.store.Add(frame.BuildEventFrame("Microphone stream started", ""))
+	return nil
+}
+
+func (s *Streamer) SendLiveChunk(payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	if !s.running || s.filePath != "[microphone]" {
+		s.mu.Unlock()
+		return fmt.Errorf("麦克风流未启动")
+	}
+	seq := s.seqStart + s.sentFrames
+	isFirst := s.sentFrames == 0
+	headerRules := append([]model.AudioHeaderFieldRule(nil), s.headerRules...)
+	s.mu.Unlock()
+
+	packet, err := buildPacket(headerRules, seq, payload, isFirst, true, false)
+	if err != nil {
+		s.mu.Lock()
+		s.lastError = err.Error()
+		s.finishReason = "header_error"
+		s.mu.Unlock()
+		s.store.Add(frame.BuildEventFrame("Microphone stream header error", err.Error()))
+		return err
+	}
+
+	if err := s.wsClient.SendBinary(packet); err != nil {
+		s.mu.Lock()
+		s.lastError = err.Error()
+		s.finishReason = "send_error"
+		s.mu.Unlock()
+		s.store.Add(frame.BuildEventFrame("Microphone stream send error", err.Error()))
+		return err
+	}
+
+	s.markSendSuccess(len(payload))
+	return nil
 }
 
 func (s *Streamer) IsRunning() bool {
@@ -139,8 +208,8 @@ func (s *Streamer) streamLoop(reader io.ReadCloser, frameBytes int, frameMs int,
 					if n > 0 {
 						payload := make([]byte, n)
 						copy(payload, buffer[:n])
-						isFirst := s.sentFrames == 0
-						packet, err := buildPacket(headerRules, s.seqStart+s.sentFrames, payload, isFirst, false, true)
+						seq, isFirst := s.currentSeqAndFirst()
+						packet, err := buildPacket(headerRules, seq, payload, isFirst, false, true)
 						if err != nil {
 							s.mu.Lock()
 							s.lastError = err.Error()
@@ -157,10 +226,7 @@ func (s *Streamer) streamLoop(reader io.ReadCloser, frameBytes int, frameMs int,
 							s.mu.Unlock()
 							s.store.Add(frame.BuildEventFrame("PCM stream send error", err.Error()))
 						} else {
-							s.mu.Lock()
-							s.sentFrames++
-							s.sentBytes += n
-							s.mu.Unlock()
+							s.markSendSuccess(n)
 						}
 					}
 					s.mu.Lock()
@@ -182,8 +248,8 @@ func (s *Streamer) streamLoop(reader io.ReadCloser, frameBytes int, frameMs int,
 
 			payload := make([]byte, n)
 			copy(payload, buffer[:n])
-			isFirst := s.sentFrames == 0
-			packet, err := buildPacket(headerRules, s.seqStart+s.sentFrames, payload, isFirst, true, false)
+			seq, isFirst := s.currentSeqAndFirst()
+			packet, err := buildPacket(headerRules, seq, payload, isFirst, true, false)
 			if err != nil {
 				s.mu.Lock()
 				s.lastError = err.Error()
@@ -202,12 +268,22 @@ func (s *Streamer) streamLoop(reader io.ReadCloser, frameBytes int, frameMs int,
 				s.Stop()
 				return
 			}
-			s.mu.Lock()
-			s.sentFrames++
-			s.sentBytes += n
-			s.mu.Unlock()
+			s.markSendSuccess(n)
 		}
 	}
+}
+
+func (s *Streamer) currentSeqAndFirst() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seqStart + s.sentFrames, s.sentFrames == 0
+}
+
+func (s *Streamer) markSendSuccess(payloadBytes int) {
+	s.mu.Lock()
+	s.sentFrames++
+	s.sentBytes += payloadBytes
+	s.mu.Unlock()
 }
 
 func openAudioReader(filePath string) (io.ReadCloser, error) {
@@ -472,6 +548,34 @@ func normalizeConfig(config model.AudioStreamConfig) (int, model.AudioStreamConf
 	if cfg.FilePath == "" {
 		return 0, cfg, fmt.Errorf("filePath 不能为空")
 	}
+	if cfg.SampleRate <= 0 {
+		cfg.SampleRate = 16000
+	}
+	if cfg.Channels <= 0 {
+		cfg.Channels = 1
+	}
+	if cfg.BitDepth <= 0 {
+		cfg.BitDepth = 16
+	}
+	if cfg.FrameMs <= 0 {
+		cfg.FrameMs = 20
+	}
+
+	if cfg.BitDepth%8 != 0 {
+		return 0, cfg, fmt.Errorf("bitDepth 必须是 8 的倍数")
+	}
+
+	bytesPerSample := cfg.BitDepth / 8
+	frameBytes := cfg.SampleRate * cfg.Channels * bytesPerSample * cfg.FrameMs / 1000
+	if frameBytes <= 0 {
+		return 0, cfg, fmt.Errorf("无效参数：frame bytes <= 0")
+	}
+
+	return frameBytes, cfg, nil
+}
+
+func normalizeLiveConfig(config model.AudioStreamConfig) (int, model.AudioStreamConfig, error) {
+	cfg := config
 	if cfg.SampleRate <= 0 {
 		cfg.SampleRate = 16000
 	}

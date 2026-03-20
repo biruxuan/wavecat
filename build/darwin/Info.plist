@@ -21,6 +21,8 @@
         <string>10.13.0</string>
         <key>NSHighResolutionCapable</key>
         <string>true</string>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>WaveCat 需要访问麦克风以进行实时语音采集与发送。</string>
         <key>NSHumanReadableCopyright</key>
         <string>{{.Info.Copyright}}</string>
         {{if .Info.FileAssociations}}
