@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Frame, SessionSummary } from "../types";
 
 const WAVEFORM_MODE_STORAGE_KEY = "wavecat.responseWaveformMode";
 const SLOT_SEC = 0.05; // 50ms per waveform point
 const WINDOW_SEC = 10;
 const BARS_PER_WINDOW = Math.round(WINDOW_SEC / SLOT_SEC); // 200
+const WAVEFORM_VIEW_WIDTH = 560;
+const WAVEFORM_VIEW_HEIGHT = 128;
 
 type Props = {
   frame?: Frame;
@@ -12,6 +14,7 @@ type Props = {
   liveText?: string;
   playbackWaveform?: number[];
   playbackPositionSec?: number;
+  playbackTotalDurationSec?: number;
 };
 
 export function ResponsePanel({
@@ -20,6 +23,7 @@ export function ResponsePanel({
   liveText,
   playbackWaveform = [],
   playbackPositionSec = 0,
+  playbackTotalDurationSec = 0,
 }: Props) {
   const [showWaveform, setShowWaveform] = useState(true);
   const [waveformMode, setWaveformMode] = useState<"envelope" | "scope">(() => {
@@ -42,8 +46,16 @@ export function ResponsePanel({
 
   const totalBars = playbackWaveform.length;
   const needsSlider = totalBars > BARS_PER_WINDOW;
-  const isPlaying = playbackPositionSec > 0;
-  const playedBars = playbackPositionSec / SLOT_SEC;
+  // Active playback: audio is enqueued AND position hasn't reached the end
+  const isPlaying = playbackTotalDurationSec > 0 && playbackPositionSec < playbackTotalDurationSec - 0.01;
+  const playedBars = useMemo(() => {
+    if (totalBars <= 0) return 0;
+    if (playbackTotalDurationSec > 0) {
+      const ratio = Math.max(0, Math.min(1, playbackPositionSec / playbackTotalDurationSec));
+      return ratio * totalBars;
+    }
+    return playbackPositionSec / SLOT_SEC;
+  }, [playbackPositionSec, playbackTotalDurationSec, totalBars]);
   const barsInView = Math.min(BARS_PER_WINDOW, totalBars);
 
   // Compute window start and cursor position
@@ -68,18 +80,53 @@ export function ResponsePanel({
   const viewStartInt = Math.max(0, Math.floor(windowStart));
   const visibleBars = playbackWaveform.slice(viewStartInt, viewStartInt + barsInView);
 
+  // When playback ends, sync slider to last playback position
+  const wasPlayingRef = useRef(false);
+  useEffect(() => {
+    if (wasPlayingRef.current && !isPlaying && needsSlider) {
+      setManualScrollBar(Math.max(0, totalBars - BARS_PER_WINDOW));
+    }
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying, needsSlider, totalBars]);
+
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setManualScrollBar(Number(e.target.value));
   };
 
   const sliderValue = isPlaying
-    ? Math.max(0, Math.min(totalBars - barsInView, Math.floor(windowStart)))
+    ? Math.max(0, Math.min(totalBars - barsInView, windowStart))
     : manualScrollBar;
 
-  const renderEnvelopeWaveform = (bars: number[], cursorFloat: number, width = 420, height = 84) => {
+  // Catmull-Rom to cubic bezier smooth path
+  const smoothPath = (points: [number, number][]): string => {
+    if (points.length < 2) return "";
+    if (points.length === 2)
+      return `M${points[0][0].toFixed(2)},${points[0][1].toFixed(2)} L${points[1][0].toFixed(2)},${points[1][1].toFixed(2)}`;
+    const n = points.length;
+    let d = `M${points[0][0].toFixed(2)},${points[0][1].toFixed(2)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = points[Math.max(0, i - 1)];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = points[Math.min(n - 1, i + 2)];
+      const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+      const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+      const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ` C${cp1x.toFixed(2)},${cp1y.toFixed(2)} ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+    }
+    return d;
+  };
+
+  const renderEnvelopeWaveform = (
+    bars: number[],
+    cursorFloat: number,
+    width = WAVEFORM_VIEW_WIDTH,
+    height = WAVEFORM_VIEW_HEIGHT
+  ) => {
     if (bars.length === 0) {
       return (
-        <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="empty received audio waveform">
+        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="empty received audio waveform">
           <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
           <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
         </svg>
@@ -92,25 +139,23 @@ export function ResponsePanel({
     const midY = height / 2;
     const cursorPx = cursorFloat >= 0 ? Math.min(filledWidth, cursorFloat * barPxWidth) : -1;
 
-    const upper = bars
-      .map((value, index) => {
-        const x = index * barPxWidth + barPxWidth / 2;
-        const y = midY - value * (maxBarHeight / 2);
-        return `${x.toFixed(2)},${y.toFixed(2)}`;
-      })
-      .join(" ");
+    const upperPts: [number, number][] = bars.map((value, index) => [
+      index * barPxWidth + barPxWidth / 2,
+      midY - value * (maxBarHeight / 2),
+    ] as [number, number]);
+    const lowerPts: [number, number][] = bars.map((value, index) => [
+      index * barPxWidth + barPxWidth / 2,
+      midY + value * (maxBarHeight / 2),
+    ] as [number, number]).reverse();
 
-    const lower = bars
-      .map((_, index) => {
-        const ri = bars.length - 1 - index;
-        const x = ri * barPxWidth + barPxWidth / 2;
-        const y = midY + bars[ri] * (maxBarHeight / 2);
-        return `${x.toFixed(2)},${y.toFixed(2)}`;
-      })
-      .join(" ");
+    const upperD = smoothPath(upperPts);
+    const lowerD = smoothPath(lowerPts);
+    // Closed fill path: upper curve → line to last lower → lower curve → close
+    const fillD = upperD + ` L${lowerPts[0][0].toFixed(2)},${lowerPts[0][1].toFixed(2)} ` +
+      lowerD.replace(/^M[^ ]+/, "") + " Z";
 
     return (
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="received audio envelope waveform">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="received audio envelope waveform">
         <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
         {cursorPx >= 0 && (
           <>
@@ -119,7 +164,7 @@ export function ResponsePanel({
           </>
         )}
         <line x1="0" y1={midY} x2={width} y2={midY} stroke="rgba(255,255,255,0.24)" strokeWidth="1" />
-        <polygon points={`${upper} ${lower}`} fill="rgba(100,200,255,0.35)" stroke="rgba(100,200,255,0.95)" strokeWidth="1.1" />
+        <path d={fillD} fill="rgba(100,200,255,0.35)" stroke="rgba(100,200,255,0.95)" strokeWidth="1.1" />
         {cursorPx >= 0 && (
           <>
             <line x1={cursorPx} y1="0" x2={cursorPx} y2={height} stroke="rgba(255,204,90,0.95)" strokeWidth="1.2" />
@@ -131,10 +176,15 @@ export function ResponsePanel({
     );
   };
 
-  const renderScopeWaveform = (bars: number[], cursorFloat: number, width = 420, height = 84) => {
+  const renderScopeWaveform = (
+    bars: number[],
+    cursorFloat: number,
+    width = WAVEFORM_VIEW_WIDTH,
+    height = WAVEFORM_VIEW_HEIGHT
+  ) => {
     if (bars.length === 0) {
       return (
-        <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="empty received audio scope waveform">
+        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="empty received audio scope waveform">
           <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
           <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
         </svg>
@@ -147,16 +197,14 @@ export function ResponsePanel({
     const maxAmp = Math.max(8, (height - 8) / 2);
     const cursorPx = cursorFloat >= 0 ? Math.min(filledWidth, cursorFloat * barPxWidth) : -1;
 
-    const trace = bars
-      .map((value, index) => {
-        const x = index * barPxWidth + barPxWidth / 2;
-        const y = midY - value * maxAmp;
-        return `${x.toFixed(2)},${y.toFixed(2)}`;
-      })
-      .join(" ");
+    const tracePts: [number, number][] = bars.map((value, index) => [
+      index * barPxWidth + barPxWidth / 2,
+      midY - value * maxAmp,
+    ] as [number, number]);
+    const traceD = smoothPath(tracePts);
 
     return (
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img" aria-label="received audio scope waveform">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="received audio scope waveform">
         <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
         {cursorPx >= 0 && (
           <>
@@ -165,7 +213,7 @@ export function ResponsePanel({
           </>
         )}
         <line x1="0" y1={midY} x2={width} y2={midY} stroke="rgba(255,255,255,0.24)" strokeWidth="1" />
-        <polyline points={trace} fill="none" stroke="rgba(120,220,255,0.95)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path d={traceD} fill="none" stroke="rgba(120,220,255,0.95)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         {cursorPx >= 0 && (
           <>
             <line x1={cursorPx} y1="0" x2={cursorPx} y2={height} stroke="rgba(255,204,90,0.95)" strokeWidth="1.2" />
@@ -212,15 +260,17 @@ export function ResponsePanel({
               ? renderEnvelopeWaveform(visibleBars, cursorBarFloat)
               : renderScopeWaveform(visibleBars, cursorBarFloat)}
             {needsSlider && (
-              <input
-                type="range"
-                className="waveform-slider"
-                min={0}
-                max={Math.max(0, totalBars - barsInView)}
-                value={sliderValue}
-                onChange={handleSliderChange}
-                disabled={isPlaying}
-              />
+              <div className="waveform-slider-wrap">
+                <input
+                  type="range"
+                  className="waveform-slider"
+                  min={0}
+                  max={Math.max(0, totalBars - barsInView)}
+                  step="any"
+                  value={sliderValue}
+                  onChange={handleSliderChange}
+                />
+              </div>
             )}
           </>
         )}

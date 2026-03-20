@@ -178,6 +178,7 @@ function App() {
     const streamedAudioOperationIdsRef = useRef<Set<string>>(new Set());
     const [playbackWaveform, setPlaybackWaveform] = useState<number[]>([]);
     const [playbackPositionSec, setPlaybackPositionSec] = useState(0);
+    const [playbackTotalDurationSec, setPlaybackTotalDurationSec] = useState(0);
     const playbackPosRafRef = useRef<number | null>(null);
 
     const cloneMiniTranslationHeaderPreset = () =>
@@ -386,6 +387,74 @@ function App() {
         }
     };
 
+    const buildWaveformSlotsFromPCMBase64 = (
+        base64: string,
+        sampleRateHz: number,
+        channelsCount: number,
+        slotMs = 50,
+    ): number[] => {
+        try {
+            const normalized = base64.replace(/\s/g, "");
+            if (!normalized) return [];
+
+            const raw = atob(normalized);
+            const byteLen = raw.length - (raw.length % 2);
+            if (byteLen < 2) return [];
+
+            const channelsSafe = Math.max(1, channelsCount | 0);
+            const sampleRateSafe = Math.max(1, sampleRateHz | 0);
+
+            const totalSamples = Math.floor(byteLen / 2);
+            const totalFrames = Math.floor(totalSamples / channelsSafe);
+            if (totalFrames <= 0) return [];
+
+            const framesPerSlot = Math.max(1, Math.round((sampleRateSafe * slotMs) / 1000));
+            const slotCount = Math.max(1, Math.ceil(totalFrames / framesPerSlot));
+            const slots: number[] = new Array(slotCount);
+
+            for (let slot = 0; slot < slotCount; slot += 1) {
+                const frameStart = slot * framesPerSlot;
+                const frameEnd = Math.min(totalFrames, frameStart + framesPerSlot);
+
+                let sumSq = 0;
+                let peak = 0;
+                let count = 0;
+
+                for (let frameIndex = frameStart; frameIndex < frameEnd; frameIndex += 1) {
+                    const sampleBase = frameIndex * channelsSafe;
+                    for (let ch = 0; ch < channelsSafe; ch += 1) {
+                        const sampleIndex = sampleBase + ch;
+                        const byteIndex = sampleIndex * 2;
+                        if (byteIndex + 1 >= byteLen) break;
+
+                        const lo = raw.charCodeAt(byteIndex);
+                        const hi = raw.charCodeAt(byteIndex + 1);
+                        let signed = (hi << 8) | lo;
+                        if (signed & 0x8000) signed -= 0x10000;
+
+                        const normalizedAbs = Math.abs(signed / 32768);
+                        sumSq += normalizedAbs * normalizedAbs;
+                        if (normalizedAbs > peak) peak = normalizedAbs;
+                        count += 1;
+                    }
+                }
+
+                if (count <= 0) {
+                    slots[slot] = 0;
+                    continue;
+                }
+
+                const rms = Math.sqrt(sumSq / count);
+                const amp = Math.sqrt(Math.max(0, Math.min(1, Math.max(rms, peak * 0.75))));
+                slots[slot] = Math.max(0, Math.min(1, amp));
+            }
+
+            return slots;
+        } catch {
+            return [];
+        }
+    };
+
     const processInboundTextChunks = (nextFrames: Frame[]) => {
         const newFrames = nextFrames.filter(
             (f) => f.direction === "in" && f.id > lastProcessedTextFrameIdRef.current
@@ -560,6 +629,10 @@ function App() {
             const player = pcmPlayerRef.current;
             if (player) {
                 setPlaybackPositionSec(player.getPlaybackPositionSec());
+                setPlaybackTotalDurationSec(player.getTotalEnqueuedDurationSec());
+            } else {
+                setPlaybackPositionSec(0);
+                setPlaybackTotalDurationSec(0);
             }
             playbackPosRafRef.current = requestAnimationFrame(tick);
         };
@@ -581,6 +654,7 @@ function App() {
                 setServerPCMPlaying(false);
                 setPlaybackWaveform([]);
                 setPlaybackPositionSec(0);
+                setPlaybackTotalDurationSec(0);
                 const playbackState = player.getPlaybackState();                setAudioProbe((prev) => ({
                     ...prev,
                     queueLength: playbackState.queueLength,
@@ -609,6 +683,7 @@ function App() {
         setServerPCMPlaying(false);
         setPlaybackWaveform([]);
         setPlaybackPositionSec(0);
+        setPlaybackTotalDurationSec(0);
         const playbackState = player.getPlaybackState();
         setAudioProbe((prev) => ({
             ...prev,
@@ -677,11 +752,16 @@ function App() {
             try {
                 lastDiagnostics = await pcmPlayerRef.current.enqueuePCM16Base64(chunk, serverPCMSampleRate, serverPCMChannels);
                 if (lastDiagnostics) {
-                    const amp = Math.sqrt(Math.max(0, Math.min(1, Math.max(lastDiagnostics.rms, lastDiagnostics.peak * 0.75))));
-                    const slotCount = Math.max(1, Math.round(lastDiagnostics.durationMs / 50));
+                    const slots = buildWaveformSlotsFromPCMBase64(chunk, serverPCMSampleRate, serverPCMChannels, 50);
+                    const fallbackAmp = Math.sqrt(Math.max(0, Math.min(1, Math.max(lastDiagnostics.rms, lastDiagnostics.peak * 0.75))));
+                    const fallbackCount = Math.max(1, Math.round(lastDiagnostics.durationMs / 50));
                     setPlaybackWaveform((prev) => {
                         const next = prev.slice();
-                        for (let si = 0; si < slotCount; si++) next.push(amp);
+                        if (slots.length > 0) {
+                            for (let si = 0; si < slots.length; si += 1) next.push(slots[si]);
+                        } else {
+                            for (let si = 0; si < fallbackCount; si += 1) next.push(fallbackAmp);
+                        }
                         return next;
                     });
                 }
@@ -1164,6 +1244,7 @@ function App() {
         resetMicVisuals();
         setPlaybackWaveform([]);
         setPlaybackPositionSec(0);
+        setPlaybackTotalDurationSec(0);
         lastPlayedInboundFrameIdRef.current = 0;
         lastProcessedTextFrameIdRef.current = 0;
         setLiveAssistantText("");
@@ -1183,6 +1264,7 @@ function App() {
         resetMicVisuals();
         setPlaybackWaveform([]);
         setPlaybackPositionSec(0);
+        setPlaybackTotalDurationSec(0);
         lastPlayedInboundFrameIdRef.current = 0;
         lastProcessedTextFrameIdRef.current = 0;
         setLiveAssistantText("");
@@ -2426,6 +2508,7 @@ function App() {
                         liveText={liveAssistantText}
                         playbackWaveform={playbackWaveform}
                         playbackPositionSec={playbackPositionSec}
+                        playbackTotalDurationSec={playbackTotalDurationSec}
                     />
                 </div>
                 <div className={frameDetailCollapsed ? "right-column frame-detail-collapsed" : "right-column"}>

@@ -540,10 +540,18 @@ button:disabled {
   line-height: 1.2;
 }
 
+.waveform-slider-wrap {
+  margin-top: 4px;
+  padding: 0;
+  overflow: hidden;
+}
+
 .waveform-slider {
+  display: block;
   width: 100%;
   height: 14px;
-  margin: 4px 0 0;
+  margin: 0;
+  padding: 0;
   -webkit-appearance: none;
   appearance: none;
   background: rgba(255, 255, 255, 0.08);
@@ -554,7 +562,7 @@ button:disabled {
 
 .waveform-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 24px;
+  width: 16px;
   height: 12px;
   border-radius: 3px;
   background: rgba(100, 200, 255, 0.6);
