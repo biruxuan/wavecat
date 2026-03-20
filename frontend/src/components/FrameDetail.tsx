@@ -32,39 +32,12 @@ export function FrameDetail({ frame, collapsed, onToggleCollapsed }: Props) {
     setCopyText("Copy");
   }, [availableTabs, frame?.id]);
 
-  if (collapsed) {
-    return (
-      <section className="panel frame-detail-panel frame-detail-panel-collapsed">
-        <div className="panel-header">
-          <div className="panel-title">Frame Detail</div>
-          <button type="button" onClick={onToggleCollapsed}>
-            Expand
-          </button>
-        </div>
-      </section>
-    );
-  }
-
-  if (!frame) {
-    return (
-      <section className="panel frame-detail-panel">
-        <div className="panel-header">
-          <div className="panel-title">Frame Detail</div>
-          <button type="button" onClick={onToggleCollapsed}>
-            Collapse
-          </button>
-        </div>
-        <div className="placeholder">Select a frame to inspect details.</div>
-      </section>
-    );
-  }
-
   const contentByTab: Record<TabKey, string> = {
-    summary: frame.summary,
-    text: frame.text ?? "",
-    hex: frame.hex ?? "",
-    ascii: frame.ascii ?? "",
-    base64: frame.base64 ?? "",
+    summary: frame?.summary ?? "",
+    text: frame?.text ?? "",
+    hex: frame?.hex ?? "",
+    ascii: frame?.ascii ?? "",
+    base64: frame?.base64 ?? "",
   };
 
   const currentContent = contentByTab[activeTab] ?? "";
@@ -82,37 +55,61 @@ export function FrameDetail({ frame, collapsed, onToggleCollapsed }: Props) {
 
   return (
     <section className="panel frame-detail-panel">
-      <div className="panel-header">
+      <div className="frame-detail-panel-header">
         <div className="panel-title">Frame Detail</div>
         <div className="frame-detail-actions">
-          <button type="button" onClick={handleCopy} disabled={!currentContent}>
-            {copyText}
-          </button>
-          <button type="button" onClick={onToggleCollapsed}>
-            Collapse
-          </button>
+          {frame && (
+            <button type="button" onClick={handleCopy} disabled={!currentContent}>
+              {copyText}
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          className="connection-collapse-button"
+          aria-label={collapsed ? "Expand frame detail" : "Collapse frame detail"}
+          title={collapsed ? "Expand" : "Collapse"}
+          onClick={onToggleCollapsed}
+        >
+          <svg
+            className={`collapse-chevron${collapsed ? " is-collapsed" : ""}`}
+            viewBox="0 0 12 12"
+            aria-hidden="true"
+          >
+            <path d="M3 4.5L6 7.5L9 4.5" />
+          </svg>
+        </button>
+      </div>
+      <div className={`frame-detail-body-wrap${collapsed ? " collapsed" : ""}`}>
+        <div className="frame-detail-body-inner">
+          {!frame ? (
+            <div className="placeholder">Select a frame to inspect details.</div>
+          ) : (
+            <>
+              <div className="detail-meta">
+                <span>ID: {frame.id}</span>
+                <span>Type: {frame.type}</span>
+                <span>Direction: {frame.direction}</span>
+                <span>Size: {frame.size}</span>
+              </div>
+              {frame.error ? <div className="error-box">{frame.error}</div> : null}
+              <div className="tab-row">
+                {availableTabs.map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    className={activeTab === tab ? "tab-button active" : "tab-button"}
+                    onClick={() => setActiveTab(tab)}
+                  >
+                    {tab.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <pre>{currentContent || "No data"}</pre>
+            </>
+          )}
         </div>
       </div>
-      <div className="detail-meta">
-        <span>ID: {frame.id}</span>
-        <span>Type: {frame.type}</span>
-        <span>Direction: {frame.direction}</span>
-        <span>Size: {frame.size}</span>
-      </div>
-      {frame.error ? <div className="error-box">{frame.error}</div> : null}
-      <div className="tab-row">
-        {availableTabs.map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            className={activeTab === tab ? "tab-button active" : "tab-button"}
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab.toUpperCase()}
-          </button>
-        ))}
-      </div>
-      <pre>{currentContent || "No data"}</pre>
     </section>
   );
 }

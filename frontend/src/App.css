@@ -481,8 +481,7 @@ button:disabled {
 }
 
 .connection-panel,
-.send-panel,
-.frame-detail-panel {
+.send-panel {
   overflow: auto;
 }
 
@@ -601,11 +600,38 @@ button:disabled {
 }
 
 .frame-list-panel {
+  padding: 0;
+  gap: 0;
   overflow: hidden;
 }
 
-.frame-list-panel-collapsed {
+.frame-list-panel-header {
+  height: 40px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.frame-list-body-wrap {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.frame-list-body-wrap.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.frame-list-body-inner {
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
 }
 
 .frame-list-actions {
@@ -614,9 +640,75 @@ button:disabled {
   gap: 8px;
 }
 
-.response-panel {
-  overflow: auto;
+.frame-detail-panel {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.frame-detail-panel-header {
+  height: 40px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.frame-detail-body-wrap {
+  flex: 1;
   min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.frame-detail-body-wrap.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.frame-detail-body-inner {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.response-panel {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.response-panel-header {
+  height: 40px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.response-body-wrap {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.response-body-wrap.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.response-body-inner {
+  overflow: hidden auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
 }
 
 .live-text-block {
@@ -764,12 +856,6 @@ tr.selected {
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.frame-detail-panel-collapsed {
-  overflow: hidden;
-  flex: 0 0 auto;
-  min-height: 56px;
 }
 
 .detail-meta {

@@ -15,6 +15,8 @@ type Props = {
   playbackWaveform?: number[];
   playbackPositionSec?: number;
   playbackTotalDurationSec?: number;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 };
 
 export function ResponsePanel({
@@ -24,6 +26,8 @@ export function ResponsePanel({
   playbackWaveform = [],
   playbackPositionSec = 0,
   playbackTotalDurationSec = 0,
+  collapsed = false,
+  onToggleCollapsed,
 }: Props) {
   const [showWaveform, setShowWaveform] = useState(true);
   const [waveformMode, setWaveformMode] = useState<"envelope" | "scope">(() => {
@@ -247,8 +251,29 @@ export function ResponsePanel({
 
   return (
     <section className="panel response-panel">
-      <div className="panel-title">Response Body</div>
-      {!frame && !sessionSummary && !liveText ? <div className="placeholder">No inbound response yet.</div> : null}
+      <div className="response-panel-header">
+        <div className="panel-title">Response Body</div>
+        {onToggleCollapsed && (
+          <button
+            type="button"
+            className="connection-collapse-button"
+            aria-label={collapsed ? "Expand response panel" : "Collapse response panel"}
+            title={collapsed ? "Expand" : "Collapse"}
+            onClick={onToggleCollapsed}
+          >
+            <svg
+              className={`collapse-chevron${collapsed ? " is-collapsed" : ""}`}
+              viewBox="0 0 12 12"
+              aria-hidden="true"
+            >
+              <path d="M3 4.5L6 7.5L9 4.5" />
+            </svg>
+          </button>
+        )}
+      </div>
+      <div className={`response-body-wrap${collapsed ? " collapsed" : ""}`}>
+        <div className="response-body-inner">
+          {!frame && !sessionSummary && !liveText ? <div className="placeholder">No inbound response yet.</div> : null}
 
       <div className="live-text-block">
         <div className="waveform-header">
@@ -374,6 +399,8 @@ export function ResponsePanel({
           ) : null}
         </>
       ) : null}
+        </div>
+      </div>
     </section>
   );
 }

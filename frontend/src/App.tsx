@@ -141,6 +141,14 @@ function App() {
     const frameDetailExpandAnimatingRef = useRef(false);
     const frameDetailExpandAnimationFrameRef = useRef<number | null>(null);
     const frameDetailCollapseSourceRef = useRef<"button" | "drag" | null>(null);
+    const [responsePanelCollapsed, setResponsePanelCollapsed] = useState(false);
+    const responsePanelRef = useRef<PanelImperativeHandle | null>(null);
+    const lastExpandedResponseSizeRef = useRef(40);
+    const responseResizeStartSizeRef = useRef<number | null>(null);
+    const responseResizeDraggingRef = useRef(false);
+    const responseExpandAnimatingRef = useRef(false);
+    const responseExpandAnimationFrameRef = useRef<number | null>(null);
+    const responseCollapseSourceRef = useRef<"button" | "drag" | null>(null);
     const frameRightResizeDraggingRef = useRef(false);
     const [scrollExpandPreset, setScrollExpandPreset] = useState<"sensitive" | "stable">("sensitive");
     const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
@@ -983,10 +991,111 @@ function App() {
 
         setFrameDetailCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
     };
+
+    const handleResponseResizeStart = () => {
+        responseResizeDraggingRef.current = true;
+        if (!responsePanelCollapsed) {
+            const currentSize = responsePanelRef.current?.getSize().asPercentage;
+            if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+                responseResizeStartSizeRef.current = currentSize;
+            }
+        }
+    };
+
+    const collapseResponsePanel = () => {
+        if (responsePanelCollapsed) return;
+        if (responseExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(responseExpandAnimationFrameRef.current);
+            responseExpandAnimationFrameRef.current = null;
+        }
+        const currentSize = responsePanelRef.current?.getSize().asPercentage;
+        if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+            lastExpandedResponseSizeRef.current = currentSize;
+        }
+        const startPixels = responsePanelRef.current?.getSize().inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const targetPixels = FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        if (startPixels <= targetPixels + 0.5) {
+            responseCollapseSourceRef.current = "button";
+            responsePanelRef.current?.collapse();
+            setResponsePanelCollapsed(true);
+            responseExpandAnimatingRef.current = false;
+            return;
+        }
+        responseCollapseSourceRef.current = "button";
+        responseExpandAnimatingRef.current = true;
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startPixels + (targetPixels - startPixels) * progress;
+            responsePanelRef.current?.resize(`${size}px`);
+            if (progress < 1) {
+                responseExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+            responsePanelRef.current?.collapse();
+            setResponsePanelCollapsed(true);
+            responseExpandAnimatingRef.current = false;
+            responseExpandAnimationFrameRef.current = null;
+        };
+        responseExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const expandResponsePanel = () => {
+        const targetSize = lastExpandedResponseSizeRef.current;
+        const startSize = responsePanelRef.current?.getSize().asPercentage ?? 0;
+        if (responseExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(responseExpandAnimationFrameRef.current);
+            responseExpandAnimationFrameRef.current = null;
+        }
+        responseCollapseSourceRef.current = null;
+        responseExpandAnimatingRef.current = true;
+        responsePanelRef.current?.expand();
+        setResponsePanelCollapsed(false);
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startSize + (targetSize - startSize) * progress;
+            responsePanelRef.current?.resize(`${size}%`);
+            if (progress < 1) {
+                responseExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+            responsePanelRef.current?.resize(`${targetSize}%`);
+            responseExpandAnimatingRef.current = false;
+            responseExpandAnimationFrameRef.current = null;
+        };
+        responseExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const handleToggleResponsePanel = () => {
+        if (responsePanelCollapsed) {
+            expandResponsePanel();
+            return;
+        }
+        collapseResponsePanel();
+    };
+
+    const handleResponsePanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
+        const isActuallyCollapsed = responsePanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
+        if (responseExpandAnimatingRef.current) {
+            setResponsePanelCollapsed(false);
+            return;
+        }
+        if (isActuallyCollapsed) {
+            if (responseResizeDraggingRef.current && responseResizeStartSizeRef.current !== null && responseCollapseSourceRef.current !== "button") {
+                lastExpandedResponseSizeRef.current = responseResizeStartSizeRef.current;
+                responseCollapseSourceRef.current = "drag";
+            }
+        } else if (responseCollapseSourceRef.current === null) {
+            lastExpandedResponseSizeRef.current = panelSize.asPercentage;
+        }
+        setResponsePanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
+    };
+
     useEffect(() => {
         const handlePointerUp = () => {
             connectionResizeDraggingRef.current = false;
             connectionResizeStartSizeRef.current = null;
+            responseResizeDraggingRef.current = false;
+            responseResizeStartSizeRef.current = null;
             frameRightResizeDraggingRef.current = false;
             frameListResizeStartSizeRef.current = null;
             frameDetailResizeStartSizeRef.current = null;
@@ -1005,6 +1114,9 @@ function App() {
             }
             if (frameDetailExpandAnimationFrameRef.current !== null) {
                 cancelAnimationFrame(frameDetailExpandAnimationFrameRef.current);
+            }
+            if (responseExpandAnimationFrameRef.current !== null) {
+                cancelAnimationFrame(responseExpandAnimationFrameRef.current);
             }
         };
     }, []);
@@ -2633,10 +2745,17 @@ function App() {
                     scrollExpandPreset={scrollExpandPreset}
                 />
             </Panel>
-            <Separator className="left-column-resize-handle">
+            <Separator className="left-column-resize-handle" onPointerDown={handleResponseResizeStart}>
                 <div className="resize-handle-bar" />
             </Separator>
-            <Panel defaultSize={40} minSize={20}>
+            <Panel
+                panelRef={responsePanelRef}
+                defaultSize={40}
+                minSize="42px"
+                collapsible
+                collapsedSize="42px"
+                onResize={handleResponsePanelResize}
+            >
                 <ResponsePanel
                     frame={latestInboundFrame}
                     sessionSummary={sessionSummary}
@@ -2644,6 +2763,8 @@ function App() {
                     playbackWaveform={playbackWaveform}
                     playbackPositionSec={playbackPositionSec}
                     playbackTotalDurationSec={playbackTotalDurationSec}
+                    collapsed={responsePanelCollapsed}
+                    onToggleCollapsed={handleToggleResponsePanel}
                 />
             </Panel>
         </Group>

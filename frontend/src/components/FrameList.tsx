@@ -42,86 +42,93 @@ export function FrameList({
   const visibleFrames =
     filteredFrames.length > MAX_RENDER_FRAMES ? filteredFrames.slice(-MAX_RENDER_FRAMES) : filteredFrames;
 
-  if (collapsed) {
-    return (
-      <section className="panel frame-list-panel frame-list-panel-collapsed">
-        <div className="panel-header">
-          <div className="panel-title">Frame List</div>
-          <button type="button" onClick={onToggleCollapsed}>
-            Expand
-          </button>
-        </div>
-        <div className="status-text">已过滤 {filteredFrames.length} / 总计 {frames.length}</div>
-      </section>
-    );
-  }
-
   return (
     <section className="panel frame-list-panel">
-      <div className="panel-header">
-        <div className="panel-title">Frame List</div>
-        <div className="frame-list-actions">
-          <button type="button" onClick={onClear}>Clear</button>
-          <button type="button" onClick={onToggleCollapsed}>Collapse</button>
+      <div className="frame-list-panel-header">
+        <div className="panel-title">
+          Frame List
+          {collapsed && <span className="status-text frame-list-count"> {filteredFrames.length}/{frames.length}</span>}
         </div>
+        <div className="frame-list-actions">
+          {!collapsed && <button type="button" onClick={onClear}>Clear</button>}
+        </div>
+        <button
+          type="button"
+          className="connection-collapse-button"
+          aria-label={collapsed ? "Expand frame list" : "Collapse frame list"}
+          title={collapsed ? "Expand" : "Collapse"}
+          onClick={onToggleCollapsed}
+        >
+          <svg
+            className={`collapse-chevron${collapsed ? " is-collapsed" : ""}`}
+            viewBox="0 0 12 12"
+            aria-hidden="true"
+          >
+            <path d="M3 4.5L6 7.5L9 4.5" />
+          </svg>
+        </button>
       </div>
-      <div className="audio-grid">
-        <label className="field">
-          <span>Search</span>
-          <input value={searchText} onChange={(event) => onSearchTextChange(event.target.value)} placeholder="summary / text" />
-        </label>
-        <label className="field">
-          <span>Direction</span>
-          <select value={directionFilter} onChange={(event) => onDirectionFilterChange(event.target.value)}>
-            <option value="all">All</option>
-            <option value="in">In</option>
-            <option value="out">Out</option>
-            <option value="system">System</option>
-          </select>
-        </label>
-        <label className="field">
-          <span>Type</span>
-          <select value={typeFilter} onChange={(event) => onTypeFilterChange(event.target.value)}>
-            <option value="all">All</option>
-            <option value="text">text</option>
-            <option value="binary">binary</option>
-            <option value="ping">ping</option>
-            <option value="event">event</option>
-            <option value="unknown">unknown</option>
-          </select>
-        </label>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Dir</th>
-              <th>Type</th>
-              <th>Size</th>
-              <th>Summary</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visibleFrames.map((frame) => (
-              <tr
-                key={frame.id}
-                className={selectedId === frame.id ? "selected" : ""}
-                onClick={() => onSelect(frame.id)}
-              >
-                <td>{new Date(frame.timestamp).toLocaleTimeString()}</td>
-                <td>{frame.direction}</td>
-                <td>{frame.type}</td>
-                <td>{frame.size}</td>
-                <td title={frame.summary}>{frame.summary}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="status-text">
-        已过滤 {filteredFrames.length} / 总计 {frames.length}
-        {filteredFrames.length > MAX_RENDER_FRAMES ? `，仅渲染最近 ${MAX_RENDER_FRAMES} 条` : ""}
+      <div className={`frame-list-body-wrap${collapsed ? " collapsed" : ""}`}>
+        <div className="frame-list-body-inner">
+          <div className="audio-grid">
+            <label className="field">
+              <span>Search</span>
+              <input value={searchText} onChange={(event) => onSearchTextChange(event.target.value)} placeholder="summary / text" />
+            </label>
+            <label className="field">
+              <span>Direction</span>
+              <select value={directionFilter} onChange={(event) => onDirectionFilterChange(event.target.value)}>
+                <option value="all">All</option>
+                <option value="in">In</option>
+                <option value="out">Out</option>
+                <option value="system">System</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Type</span>
+              <select value={typeFilter} onChange={(event) => onTypeFilterChange(event.target.value)}>
+                <option value="all">All</option>
+                <option value="text">text</option>
+                <option value="binary">binary</option>
+                <option value="ping">ping</option>
+                <option value="event">event</option>
+                <option value="unknown">unknown</option>
+              </select>
+            </label>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Dir</th>
+                  <th>Type</th>
+                  <th>Size</th>
+                  <th>Summary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleFrames.map((frame) => (
+                  <tr
+                    key={frame.id}
+                    className={selectedId === frame.id ? "selected" : ""}
+                    onClick={() => onSelect(frame.id)}
+                  >
+                    <td>{new Date(frame.timestamp).toLocaleTimeString()}</td>
+                    <td>{frame.direction}</td>
+                    <td>{frame.type}</td>
+                    <td>{frame.size}</td>
+                    <td title={frame.summary}>{frame.summary}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="status-text">
+            已过滤 {filteredFrames.length} / 总计 {frames.length}
+            {filteredFrames.length > MAX_RENDER_FRAMES ? `，仅渲染最近 ${MAX_RENDER_FRAMES} 条` : ""}
+          </div>
+        </div>
       </div>
     </section>
   );
