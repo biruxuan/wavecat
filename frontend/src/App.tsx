@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Group, Panel, Separator, type PanelImperativeHandle } from "react-resizable-panels";
 import "./App.css";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { FrameDetail } from "./components/FrameDetail";
@@ -28,6 +29,7 @@ import {
 import type { AudioFileInfo, AudioHeaderFieldRule, AudioStreamStatus, Frame, SessionProfileType, SessionSummary } from "./types";
 
 function App() {
+    const MAIN_SPLIT_BREAKPOINT = 1320;
     const miniTranslationHeaderPreset = [
         { name: "magic", type: "uint16", length: 2, endian: "big", defaultValue: "43605", rule: "default" },
         { name: "version", type: "uint8", length: 1, endian: "big", defaultValue: "1", rule: "default" },
@@ -78,6 +80,9 @@ function App() {
     const [searchText, setSearchText] = useState("");
     const [directionFilter, setDirectionFilter] = useState("all");
     const [typeFilter, setTypeFilter] = useState("all");
+    const [compactMainLayout, setCompactMainLayout] = useState(
+        typeof window !== "undefined" ? window.innerWidth < MAIN_SPLIT_BREAKPOINT : false
+    );
     const [textPayload, setTextPayload] = useState('{"type":"hello"}');
     const [binaryPayload, setBinaryPayload] = useState("aGVsbG8=");
     const [binaryFilePath, setBinaryFilePath] = useState("");
@@ -113,6 +118,14 @@ function App() {
     });
     const [audioFileInfo, setAudioFileInfo] = useState<AudioFileInfo | undefined>(undefined);
     const [connectionPanelCollapsed, setConnectionPanelCollapsed] = useState(false);
+    const connectionPanelRef = useRef<PanelImperativeHandle | null>(null);
+    const CONNECTION_COLLAPSED_HEIGHT_PX = 42;
+    const lastExpandedConnectionSizeRef = useRef(25);
+    const connectionResizeStartSizeRef = useRef<number | null>(null);
+    const connectionResizeDraggingRef = useRef(false);
+    const connectionExpandAnimatingRef = useRef(false);
+    const connectionExpandAnimationFrameRef = useRef<number | null>(null);
+    const collapseSourceRef = useRef<"button" | "drag" | null>(null);
     const [scrollExpandPreset, setScrollExpandPreset] = useState<"sensitive" | "stable">("sensitive");
     const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
     const [serverPCMSampleRate, setServerPCMSampleRate] = useState(16000);
@@ -593,6 +606,156 @@ function App() {
         serverPCMAdaptiveRateEnabled,
         serverPCMAdaptiveRateStrength,
     ]);
+
+    useEffect(() => {
+        const onResize = () => {
+            setCompactMainLayout(window.innerWidth < MAIN_SPLIT_BREAKPOINT);
+        };
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, []);
+
+    const collapseConnectionPanel = () => {
+        if (connectionPanelCollapsed) {
+            return;
+        }
+        if (connectionExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
+            connectionExpandAnimationFrameRef.current = null;
+        }
+
+        // 场景1: 按钮折叠 → 记录此刻高度，expand 时恢复到这里
+        const currentSize = connectionPanelRef.current?.getSize().asPercentage;
+        if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+            lastExpandedConnectionSizeRef.current = currentSize;
+        }
+
+        const startPixels = connectionPanelRef.current?.getSize().inPixels ?? CONNECTION_COLLAPSED_HEIGHT_PX;
+        const targetPixels = CONNECTION_COLLAPSED_HEIGHT_PX;
+        const durationMs = 180;
+
+        if (startPixels <= targetPixels + 0.5) {
+            collapseSourceRef.current = "button";
+            connectionPanelRef.current?.collapse();
+            setConnectionPanelCollapsed(true);
+            connectionExpandAnimatingRef.current = false;
+            return;
+        }
+
+        collapseSourceRef.current = "button";
+        connectionExpandAnimatingRef.current = true;
+
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / durationMs);
+            const size = startPixels + (targetPixels - startPixels) * progress;
+            connectionPanelRef.current?.resize(`${size}px`);
+
+            if (progress < 1) {
+                connectionExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+
+            connectionPanelRef.current?.collapse();
+            setConnectionPanelCollapsed(true);
+            connectionExpandAnimatingRef.current = false;
+            connectionExpandAnimationFrameRef.current = null;
+        };
+
+        connectionExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const expandConnectionPanel = () => {
+        const targetSize = lastExpandedConnectionSizeRef.current;
+        const startSize = connectionPanelRef.current?.getSize().asPercentage ?? 0;
+        const durationMs = 180;
+
+        if (connectionExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
+            connectionExpandAnimationFrameRef.current = null;
+        }
+
+        collapseSourceRef.current = null;
+        connectionExpandAnimatingRef.current = true;
+        connectionPanelRef.current?.expand();
+        setConnectionPanelCollapsed(false);
+
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / durationMs);
+            const size = startSize + (targetSize - startSize) * progress;
+            connectionPanelRef.current?.resize(`${size}%`);
+
+            if (progress < 1) {
+                connectionExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+
+            connectionPanelRef.current?.resize(`${targetSize}%`);
+            connectionExpandAnimatingRef.current = false;
+            connectionExpandAnimationFrameRef.current = null;
+        };
+
+        connectionExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const handleToggleConnectionPanel = () => {
+        if (connectionPanelCollapsed) {
+            expandConnectionPanel();
+            return;
+        }
+        collapseConnectionPanel();
+    };
+
+    const handleConnectionResizeStart = () => {
+        connectionResizeDraggingRef.current = true;
+        if (!connectionPanelCollapsed) {
+            // 场景2: 拖拽开始 → 记录此刻高度，如果这次拖拽导致折叠则 expand 恢复到这里
+            const currentSize = connectionPanelRef.current?.getSize().asPercentage;
+            if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+                connectionResizeStartSizeRef.current = currentSize;
+            }
+        }
+    };
+
+    const handleConnectionPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
+        const isActuallyCollapsed = connectionPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
+
+        if (connectionExpandAnimatingRef.current) {
+            setConnectionPanelCollapsed(false);
+            return;
+        }
+
+        if (isActuallyCollapsed) {
+            // 刚刚变为折叠：锁定恢复目标，不再被后续 onResize 覆盖
+            if (connectionResizeDraggingRef.current && connectionResizeStartSizeRef.current !== null && collapseSourceRef.current !== "button") {
+                // 场景2: 拖拽导致折叠 → 用拖拽按下瞬间的高度
+                lastExpandedConnectionSizeRef.current = connectionResizeStartSizeRef.current;
+                collapseSourceRef.current = "drag";
+            }
+            // 场景1（button）或已锁定：不做任何覆盖
+        } else if (collapseSourceRef.current === null) {
+            // 未折叠且不在折叠恢复过程中：正常跟踪
+            lastExpandedConnectionSizeRef.current = panelSize.asPercentage;
+        }
+
+        setConnectionPanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
+    };
+    useEffect(() => {
+        const handlePointerUp = () => {
+            connectionResizeDraggingRef.current = false;
+            connectionResizeStartSizeRef.current = null;
+        };
+        window.addEventListener("pointerup", handlePointerUp);
+        return () => window.removeEventListener("pointerup", handlePointerUp);
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (connectionExpandAnimationFrameRef.current !== null) {
+                cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
+            }
+        };
+    }, []);
+
 
 
 
@@ -2071,7 +2234,7 @@ function App() {
         }
     };
 
-        const audioProbeMiniClass = !autoPlayServerPCM
+    const audioProbeMiniClass = !autoPlayServerPCM
                 ? "off"
                 : audioProbe.scanned === 0
                     ? "idle"
@@ -2080,6 +2243,190 @@ function App() {
                         : audioProbe.failed > 0
                             ? "warn"
                             : "good";
+
+    const leftColumnPanel = (
+        <Group orientation="vertical" style={{ flex: 1, minHeight: 0 }}>
+            <Panel
+                panelRef={connectionPanelRef}
+                defaultSize={25}
+                minSize="42px"
+                collapsible
+                collapsedSize="42px"
+                onResize={handleConnectionPanelResize}
+            >
+                <ConnectionPanel
+                    url={url}
+                    headersText={headersText}
+                    queryParamsText={queryParamsText}
+                    subprotocol={subprotocol}
+                    connected={connected}
+                    statusText={statusText}
+                    savedConnections={savedConnections}
+                    isCollapsed={connectionPanelCollapsed}
+                    onToggleCollapsed={handleToggleConnectionPanel}
+                    onUrlChange={setUrl}
+                    onHeadersChange={setHeadersText}
+                    onQueryParamsChange={setQueryParamsText}
+                    onSubprotocolChange={setSubprotocol}
+                    onConnect={handleConnect}
+                    onReconnect={handleReconnect}
+                    onDisconnect={handleDisconnect}
+                    onPing={handlePing}
+                    onUseSavedConnection={handleUseSavedConnection}
+                    onSaveCurrentConnection={handleSaveCurrentConnection}
+                />
+            </Panel>
+            <Separator className="left-column-resize-handle" onPointerDown={handleConnectionResizeStart}>
+                <div className="resize-handle-bar" />
+            </Separator>
+            <Panel defaultSize={35} minSize={20}>
+                <SendPanel
+                    textPayload={textPayload}
+                    binaryPayload={binaryPayload}
+                    binaryFilePath={binaryFilePath}
+                    pcmFilePath={pcmFilePath}
+                    sampleRate={sampleRate}
+                    channels={channels}
+                    bitDepth={bitDepth}
+                    frameMs={frameMs}
+                    seqStart={seqStart}
+                    headerRules={headerRules}
+                    headerTemplates={headerTemplates}
+                    streaming={streaming}
+                    connected={connected}
+                    sessionProfile={sessionProfile}
+                    streamStatus={streamStatus}
+                    micStreaming={micStreaming}
+                    micInputLevel={micInputLevel}
+                    micWaveform={micWaveform}
+                    playbackWaveform={playbackWaveform}
+                    audioFileInfo={audioFileInfo}
+                    translationFromLanguage={translationFromLanguage}
+                    translationToLanguagesText={translationToLanguagesText}
+                    audioParamSource={audioParamSource}
+                    headerConfigSource={headerConfigSource}
+                    onTextChange={setTextPayload}
+                    onBinaryChange={setBinaryPayload}
+                    onBinaryFilePathChange={setBinaryFilePath}
+                    onPcmFilePathChange={(value) => {
+                        setPcmFilePath(value);
+                        if (audioFileInfo?.path !== value.trim()) {
+                            setAudioFileInfo(undefined);
+                        }
+                    }}
+                    onPickBinaryFile={handlePickBinaryFile}
+                    onPickPcmFile={handlePickPcmFile}
+                    onSampleRateChange={(value) => {
+                        setSampleRate(value);
+                        setAudioParamSource("Manual");
+                    }}
+                    onChannelsChange={(value) => {
+                        setChannels(value);
+                        setAudioParamSource("Manual");
+                    }}
+                    onBitDepthChange={(value) => {
+                        setBitDepth(value);
+                        setAudioParamSource("Manual");
+                    }}
+                    onFrameMsChange={(value) => {
+                        setFrameMs(value);
+                        setAudioParamSource("Manual");
+                    }}
+                    onSeqStartChange={(value) => {
+                        setSeqStart(value);
+                        setHeaderConfigSource("Manual");
+                    }}
+                    onHeaderRulesChange={(value) => {
+                        setHeaderRules(value);
+                        setHeaderConfigSource("Manual");
+                    }}
+                    onSaveHeaderTemplate={handleSaveHeaderTemplate}
+                    onLoadHeaderTemplate={handleLoadHeaderTemplate}
+                    onRenameHeaderTemplate={handleRenameHeaderTemplate}
+                    onDeleteHeaderTemplate={handleDeleteHeaderTemplate}
+                    onApplyMiniTranslationPreset={handleApplyMiniTranslationPreset}
+                    onRunMiniTranslation={handleRunMiniTranslation}
+                    onTranslationFromLanguageChange={(value) => setTranslationFromLanguage(normalizeLanguageTag(value) || value.trim())}
+                    onTranslationToLanguagesChange={(value) => setTranslationToLanguagesText(value)}
+                    onApplyTranslationLanguagePreset={(fromLanguage, toLanguages) => {
+                        const normalizedFromLanguage = normalizeLanguageTag(fromLanguage) || "zh-CN";
+                        const normalizedToLanguagesText = toLanguages
+                            .map((item) => normalizeLanguageTag(item))
+                            .filter(Boolean)
+                            .join(", ");
+                        setTranslationFromLanguage(normalizedFromLanguage);
+                        setTranslationToLanguagesText(normalizedToLanguagesText);
+                        if (sessionProfile === "translation") {
+                            setTextPayload(buildTranslationStartTemplate(normalizedFromLanguage, normalizedToLanguagesText));
+                        }
+                    }}
+                    onSessionProfileChange={setSessionProfile}
+                    onApplyJSONTemplate={handleApplyJSONTemplate}
+                    onSendText={handleSendText}
+                    onSendBinary={handleSendBinary}
+                    onSendBinaryFile={handleSendBinaryFile}
+                    onRunSession={handleRunSession}
+                    onStartStream={handleStartStream}
+                    onStopStream={handleStopStream}
+                    onStartMicStream={handleStartMicStream}
+                    onStopMicStream={handleStopMicStream}
+                    onScrollCollapse={(collapsed) => {
+                        if (collapsed) {
+                            collapseConnectionPanel();
+                            return;
+                        }
+                        expandConnectionPanel();
+                    }}
+                    scrollExpandPreset={scrollExpandPreset}
+                />
+            </Panel>
+            <Separator className="left-column-resize-handle">
+                <div className="resize-handle-bar" />
+            </Separator>
+            <Panel defaultSize={40} minSize={20}>
+                <ResponsePanel
+                    frame={latestInboundFrame}
+                    sessionSummary={sessionSummary}
+                    liveText={liveAssistantText}
+                    playbackWaveform={playbackWaveform}
+                    playbackPositionSec={playbackPositionSec}
+                    playbackTotalDurationSec={playbackTotalDurationSec}
+                />
+            </Panel>
+        </Group>
+    );
+
+    const rightColumnPanel = (
+        <Group orientation="vertical" style={{ flex: 1, minHeight: 0 }}>
+            <Panel defaultSize={50} minSize={25}>
+                <FrameList
+                    frames={frames}
+                    selectedId={selectedId}
+                    searchText={searchText}
+                    directionFilter={directionFilter}
+                    typeFilter={typeFilter}
+                    onClear={handleClear}
+                    onSearchTextChange={setSearchText}
+                    onDirectionFilterChange={setDirectionFilter}
+                    onTypeFilterChange={setTypeFilter}
+                    onSelect={(id) => {
+                        setSelectedId(id);
+                        setFrameDetailCollapsed(false);
+                    }}
+                />
+            </Panel>
+            <Separator className="right-column-resize-handle">
+                <div className="resize-handle-bar" />
+            </Separator>
+            <Panel defaultSize={50} minSize={25}>
+                <FrameDetail
+                    frame={selectedFrame}
+                    collapsed={frameDetailCollapsed}
+                    onToggleCollapsed={() => setFrameDetailCollapsed((prev) => !prev)}
+                />
+            </Panel>
+        </Group>
+    );
 
     return (
         <div id="app" className="layout">
@@ -2386,154 +2733,26 @@ function App() {
                     ) : null}
                 </div>
             </header>
-            <div className="workspace-grid">
-                <div className="left-column">
-                    <ConnectionPanel
-                        url={url}
-                        headersText={headersText}
-                        queryParamsText={queryParamsText}
-                        subprotocol={subprotocol}
-                        connected={connected}
-                        statusText={statusText}
-                        savedConnections={savedConnections}
-                        isCollapsed={connectionPanelCollapsed}
-                        onToggleCollapsed={() => setConnectionPanelCollapsed((prev) => !prev)}
-                        onUrlChange={setUrl}
-                        onHeadersChange={setHeadersText}
-                        onQueryParamsChange={setQueryParamsText}
-                        onSubprotocolChange={setSubprotocol}
-                        onConnect={handleConnect}
-                        onReconnect={handleReconnect}
-                        onDisconnect={handleDisconnect}
-                        onPing={handlePing}
-                        onUseSavedConnection={handleUseSavedConnection}
-                        onSaveCurrentConnection={handleSaveCurrentConnection}
-                    />
-                    <SendPanel
-                        textPayload={textPayload}
-                        binaryPayload={binaryPayload}
-                        binaryFilePath={binaryFilePath}
-                        pcmFilePath={pcmFilePath}
-                        sampleRate={sampleRate}
-                        channels={channels}
-                        bitDepth={bitDepth}
-                        frameMs={frameMs}
-                        seqStart={seqStart}
-                        headerRules={headerRules}
-                        headerTemplates={headerTemplates}
-                        streaming={streaming}
-                        connected={connected}
-                        sessionProfile={sessionProfile}
-                        streamStatus={streamStatus}
-                        micStreaming={micStreaming}
-                        micInputLevel={micInputLevel}
-                        micWaveform={micWaveform}
-                        playbackWaveform={playbackWaveform}
-                        audioFileInfo={audioFileInfo}
-                        translationFromLanguage={translationFromLanguage}
-                        translationToLanguagesText={translationToLanguagesText}
-                        audioParamSource={audioParamSource}
-                        headerConfigSource={headerConfigSource}
-                        onTextChange={setTextPayload}
-                        onBinaryChange={setBinaryPayload}
-                        onBinaryFilePathChange={setBinaryFilePath}
-                        onPcmFilePathChange={(value) => {
-                            setPcmFilePath(value);
-                            if (audioFileInfo?.path !== value.trim()) {
-                                setAudioFileInfo(undefined);
-                            }
-                        }}
-                        onPickBinaryFile={handlePickBinaryFile}
-                        onPickPcmFile={handlePickPcmFile}
-                        onSampleRateChange={(value) => {
-                            setSampleRate(value);
-                            setAudioParamSource("Manual");
-                        }}
-                        onChannelsChange={(value) => {
-                            setChannels(value);
-                            setAudioParamSource("Manual");
-                        }}
-                        onBitDepthChange={(value) => {
-                            setBitDepth(value);
-                            setAudioParamSource("Manual");
-                        }}
-                        onFrameMsChange={(value) => {
-                            setFrameMs(value);
-                            setAudioParamSource("Manual");
-                        }}
-                        onSeqStartChange={(value) => {
-                            setSeqStart(value);
-                            setHeaderConfigSource("Manual");
-                        }}
-                        onHeaderRulesChange={(value) => {
-                            setHeaderRules(value);
-                            setHeaderConfigSource("Manual");
-                        }}
-                        onSaveHeaderTemplate={handleSaveHeaderTemplate}
-                        onLoadHeaderTemplate={handleLoadHeaderTemplate}
-                        onRenameHeaderTemplate={handleRenameHeaderTemplate}
-                        onDeleteHeaderTemplate={handleDeleteHeaderTemplate}
-                        onApplyMiniTranslationPreset={handleApplyMiniTranslationPreset}
-                        onRunMiniTranslation={handleRunMiniTranslation}
-                        onTranslationFromLanguageChange={(value) => setTranslationFromLanguage(normalizeLanguageTag(value) || value.trim())}
-                        onTranslationToLanguagesChange={(value) => setTranslationToLanguagesText(value)}
-                        onApplyTranslationLanguagePreset={(fromLanguage, toLanguages) => {
-                            const normalizedFromLanguage = normalizeLanguageTag(fromLanguage) || "zh-CN";
-                            const normalizedToLanguagesText = toLanguages
-                                .map((item) => normalizeLanguageTag(item))
-                                .filter(Boolean)
-                                .join(", ");
-                            setTranslationFromLanguage(normalizedFromLanguage);
-                            setTranslationToLanguagesText(normalizedToLanguagesText);
-                            if (sessionProfile === "translation") {
-                                setTextPayload(buildTranslationStartTemplate(normalizedFromLanguage, normalizedToLanguagesText));
-                            }
-                        }}
-                        onSessionProfileChange={setSessionProfile}
-                        onApplyJSONTemplate={handleApplyJSONTemplate}
-                        onSendText={handleSendText}
-                        onSendBinary={handleSendBinary}
-                        onSendBinaryFile={handleSendBinaryFile}
-                        onRunSession={handleRunSession}
-                        onStartStream={handleStartStream}
-                        onStopStream={handleStopStream}
-                        onStartMicStream={handleStartMicStream}
-                        onStopMicStream={handleStopMicStream}
-                        onScrollCollapse={(collapsed) => setConnectionPanelCollapsed(collapsed)}
-                        scrollExpandPreset={scrollExpandPreset}
-                    />
-                    <ResponsePanel
-                        frame={latestInboundFrame}
-                        sessionSummary={sessionSummary}
-                        liveText={liveAssistantText}
-                        playbackWaveform={playbackWaveform}
-                        playbackPositionSec={playbackPositionSec}
-                        playbackTotalDurationSec={playbackTotalDurationSec}
-                    />
+            {compactMainLayout ? (
+                <div className="workspace-grid">
+                    {leftColumnPanel}
+                    {rightColumnPanel}
                 </div>
-                <div className={frameDetailCollapsed ? "right-column frame-detail-collapsed" : "right-column"}>
-                    <FrameList
-                        frames={frames}
-                        selectedId={selectedId}
-                        searchText={searchText}
-                        directionFilter={directionFilter}
-                        typeFilter={typeFilter}
-                        onClear={handleClear}
-                        onSearchTextChange={setSearchText}
-                        onDirectionFilterChange={setDirectionFilter}
-                        onTypeFilterChange={setTypeFilter}
-                        onSelect={(id) => {
-                            setSelectedId(id);
-                            setFrameDetailCollapsed(false);
-                        }}
-                    />
-                    <FrameDetail
-                        frame={selectedFrame}
-                        collapsed={frameDetailCollapsed}
-                        onToggleCollapsed={() => setFrameDetailCollapsed((prev) => !prev)}
-                    />
+            ) : (
+                <div className="workspace-split-root">
+                    <Group orientation="horizontal" style={{ flex: 1, minHeight: 0 }}>
+                        <Panel defaultSize={56} minSize={35}>
+                            {leftColumnPanel}
+                        </Panel>
+                        <Separator className="workspace-resize-handle">
+                            <div className="workspace-resize-bar" />
+                        </Separator>
+                        <Panel defaultSize={44} minSize={30}>
+                            {rightColumnPanel}
+                        </Panel>
+                    </Group>
                 </div>
-            </div>
+            )}
         </div>
     );
 }
