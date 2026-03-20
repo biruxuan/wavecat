@@ -77,8 +77,23 @@ export function ResponsePanel({
     return { windowStart: playedBars - halfWindow, cursorBarFloat: halfWindow };
   }, [isPlaying, totalBars, playedBars, needsSlider, manualScrollBar]);
 
+  const sampleWaveformAt = (data: number[], indexFloat: number): number => {
+    if (data.length === 0) return 0;
+    const clamped = Math.max(0, Math.min(data.length - 1, indexFloat));
+    const left = Math.floor(clamped);
+    const right = Math.min(data.length - 1, left + 1);
+    const frac = clamped - left;
+    const lv = data[left] ?? 0;
+    const rv = data[right] ?? lv;
+    return lv + (rv - lv) * frac;
+  };
+
   const viewStartInt = Math.max(0, Math.floor(windowStart));
-  const visibleBars = playbackWaveform.slice(viewStartInt, viewStartInt + barsInView);
+  const viewOffsetBars = Math.max(0, windowStart - viewStartInt);
+  const visibleBars = useMemo(() => {
+    // +1 keeps right edge filled when we shift by fractional offset
+    return playbackWaveform.slice(viewStartInt, viewStartInt + barsInView + 1);
+  }, [playbackWaveform, viewStartInt, barsInView]);
 
   // When playback ends, sync slider to last playback position
   const wasPlayingRef = useRef(false);
@@ -121,6 +136,7 @@ export function ResponsePanel({
   const renderEnvelopeWaveform = (
     bars: number[],
     cursorFloat: number,
+    offsetBars = 0,
     width = WAVEFORM_VIEW_WIDTH,
     height = WAVEFORM_VIEW_HEIGHT
   ) => {
@@ -139,12 +155,14 @@ export function ResponsePanel({
     const midY = height / 2;
     const cursorPx = cursorFloat >= 0 ? Math.min(filledWidth, cursorFloat * barPxWidth) : -1;
 
+    const cursorAmp = sampleWaveformAt(bars, cursorFloat + offsetBars);
+
     const upperPts: [number, number][] = bars.map((value, index) => [
-      index * barPxWidth + barPxWidth / 2,
+      (index + 0.5 - offsetBars) * barPxWidth,
       midY - value * (maxBarHeight / 2),
     ] as [number, number]);
     const lowerPts: [number, number][] = bars.map((value, index) => [
-      index * barPxWidth + barPxWidth / 2,
+      (index + 0.5 - offsetBars) * barPxWidth,
       midY + value * (maxBarHeight / 2),
     ] as [number, number]).reverse();
 
@@ -168,8 +186,8 @@ export function ResponsePanel({
         {cursorPx >= 0 && (
           <>
             <line x1={cursorPx} y1="0" x2={cursorPx} y2={height} stroke="rgba(255,204,90,0.95)" strokeWidth="1.2" />
-            <circle cx={cursorPx} cy={midY - (bars[Math.min(bars.length - 1, Math.floor(cursorFloat))] ?? 0) * (maxBarHeight / 2)} r="2.2" fill="rgba(255,204,90,0.95)" />
-            <circle cx={cursorPx} cy={midY + (bars[Math.min(bars.length - 1, Math.floor(cursorFloat))] ?? 0) * (maxBarHeight / 2)} r="2.2" fill="rgba(255,204,90,0.95)" />
+            <circle cx={cursorPx} cy={midY - cursorAmp * (maxBarHeight / 2)} r="2.2" fill="rgba(255,204,90,0.95)" />
+            <circle cx={cursorPx} cy={midY + cursorAmp * (maxBarHeight / 2)} r="2.2" fill="rgba(255,204,90,0.95)" />
           </>
         )}
       </svg>
@@ -179,6 +197,7 @@ export function ResponsePanel({
   const renderScopeWaveform = (
     bars: number[],
     cursorFloat: number,
+    offsetBars = 0,
     width = WAVEFORM_VIEW_WIDTH,
     height = WAVEFORM_VIEW_HEIGHT
   ) => {
@@ -197,8 +216,10 @@ export function ResponsePanel({
     const maxAmp = Math.max(8, (height - 8) / 2);
     const cursorPx = cursorFloat >= 0 ? Math.min(filledWidth, cursorFloat * barPxWidth) : -1;
 
+    const cursorAmp = sampleWaveformAt(bars, cursorFloat + offsetBars);
+
     const tracePts: [number, number][] = bars.map((value, index) => [
-      index * barPxWidth + barPxWidth / 2,
+      (index + 0.5 - offsetBars) * barPxWidth,
       midY - value * maxAmp,
     ] as [number, number]);
     const traceD = smoothPath(tracePts);
@@ -217,7 +238,7 @@ export function ResponsePanel({
         {cursorPx >= 0 && (
           <>
             <line x1={cursorPx} y1="0" x2={cursorPx} y2={height} stroke="rgba(255,204,90,0.95)" strokeWidth="1.2" />
-            <circle cx={cursorPx} cy={midY - (bars[Math.min(bars.length - 1, Math.floor(cursorFloat))] ?? 0) * maxAmp} r="2.4" fill="rgba(255,204,90,0.95)" />
+            <circle cx={cursorPx} cy={midY - cursorAmp * maxAmp} r="2.4" fill="rgba(255,204,90,0.95)" />
           </>
         )}
       </svg>
@@ -257,8 +278,8 @@ export function ResponsePanel({
         {showWaveform && (
           <>
             {waveformMode === "envelope"
-              ? renderEnvelopeWaveform(visibleBars, cursorBarFloat)
-              : renderScopeWaveform(visibleBars, cursorBarFloat)}
+              ? renderEnvelopeWaveform(visibleBars, cursorBarFloat, viewOffsetBars)
+              : renderScopeWaveform(visibleBars, cursorBarFloat, viewOffsetBars)}
             {needsSlider && (
               <div className="waveform-slider-wrap">
                 <input
