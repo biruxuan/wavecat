@@ -76,7 +76,7 @@ function App() {
     const [connected, setConnected] = useState(false);
     const [frames, setFrames] = useState<Frame[]>([]);
     const [selectedId, setSelectedId] = useState<number | null>(null);
-    const [frameDetailCollapsed, setFrameDetailCollapsed] = useState(true);
+    const [frameDetailCollapsed, setFrameDetailCollapsed] = useState(false);
     const [searchText, setSearchText] = useState("");
     const [directionFilter, setDirectionFilter] = useState("all");
     const [typeFilter, setTypeFilter] = useState("all");
@@ -119,13 +119,29 @@ function App() {
     const [audioFileInfo, setAudioFileInfo] = useState<AudioFileInfo | undefined>(undefined);
     const [connectionPanelCollapsed, setConnectionPanelCollapsed] = useState(false);
     const connectionPanelRef = useRef<PanelImperativeHandle | null>(null);
+    const PANEL_COLLAPSE_ANIMATION_MS = 180;
     const CONNECTION_COLLAPSED_HEIGHT_PX = 42;
+    const FRAME_PANEL_COLLAPSED_HEIGHT_PX = 42;
     const lastExpandedConnectionSizeRef = useRef(25);
     const connectionResizeStartSizeRef = useRef<number | null>(null);
     const connectionResizeDraggingRef = useRef(false);
     const connectionExpandAnimatingRef = useRef(false);
     const connectionExpandAnimationFrameRef = useRef<number | null>(null);
     const collapseSourceRef = useRef<"button" | "drag" | null>(null);
+    const [frameListCollapsed, setFrameListCollapsed] = useState(false);
+    const frameListPanelRef = useRef<PanelImperativeHandle | null>(null);
+    const lastExpandedFrameListSizeRef = useRef(50);
+    const frameListResizeStartSizeRef = useRef<number | null>(null);
+    const frameListExpandAnimatingRef = useRef(false);
+    const frameListExpandAnimationFrameRef = useRef<number | null>(null);
+    const frameListCollapseSourceRef = useRef<"button" | "drag" | null>(null);
+    const frameDetailPanelRef = useRef<PanelImperativeHandle | null>(null);
+    const lastExpandedFrameDetailSizeRef = useRef(50);
+    const frameDetailResizeStartSizeRef = useRef<number | null>(null);
+    const frameDetailExpandAnimatingRef = useRef(false);
+    const frameDetailExpandAnimationFrameRef = useRef<number | null>(null);
+    const frameDetailCollapseSourceRef = useRef<"button" | "drag" | null>(null);
+    const frameRightResizeDraggingRef = useRef(false);
     const [scrollExpandPreset, setScrollExpandPreset] = useState<"sensitive" | "stable">("sensitive");
     const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
     const [serverPCMSampleRate, setServerPCMSampleRate] = useState(16000);
@@ -632,7 +648,7 @@ function App() {
 
         const startPixels = connectionPanelRef.current?.getSize().inPixels ?? CONNECTION_COLLAPSED_HEIGHT_PX;
         const targetPixels = CONNECTION_COLLAPSED_HEIGHT_PX;
-        const durationMs = 180;
+        const durationMs = PANEL_COLLAPSE_ANIMATION_MS;
 
         if (startPixels <= targetPixels + 0.5) {
             collapseSourceRef.current = "button";
@@ -667,7 +683,7 @@ function App() {
     const expandConnectionPanel = () => {
         const targetSize = lastExpandedConnectionSizeRef.current;
         const startSize = connectionPanelRef.current?.getSize().asPercentage ?? 0;
-        const durationMs = 180;
+        const durationMs = PANEL_COLLAPSE_ANIMATION_MS;
 
         if (connectionExpandAnimationFrameRef.current !== null) {
             cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
@@ -739,10 +755,241 @@ function App() {
 
         setConnectionPanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
     };
+
+    const collapseFrameListPanel = () => {
+        if (frameListCollapsed) {
+            return;
+        }
+        if (frameListExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(frameListExpandAnimationFrameRef.current);
+            frameListExpandAnimationFrameRef.current = null;
+        }
+
+        const currentSize = frameListPanelRef.current?.getSize().asPercentage;
+        if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+            lastExpandedFrameListSizeRef.current = currentSize;
+        }
+
+        const startPixels = frameListPanelRef.current?.getSize().inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const targetPixels = FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+
+        if (startPixels <= targetPixels + 0.5) {
+            frameListCollapseSourceRef.current = "button";
+            frameListPanelRef.current?.collapse();
+            setFrameListCollapsed(true);
+            frameListExpandAnimatingRef.current = false;
+            return;
+        }
+
+        frameListCollapseSourceRef.current = "button";
+        frameListExpandAnimatingRef.current = true;
+
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startPixels + (targetPixels - startPixels) * progress;
+            frameListPanelRef.current?.resize(`${size}px`);
+
+            if (progress < 1) {
+                frameListExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+
+            frameListPanelRef.current?.collapse();
+            setFrameListCollapsed(true);
+            frameListExpandAnimatingRef.current = false;
+            frameListExpandAnimationFrameRef.current = null;
+        };
+
+        frameListExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const expandFrameListPanel = () => {
+        const targetSize = lastExpandedFrameListSizeRef.current;
+        const startSize = frameListPanelRef.current?.getSize().asPercentage ?? 0;
+
+        if (frameListExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(frameListExpandAnimationFrameRef.current);
+            frameListExpandAnimationFrameRef.current = null;
+        }
+
+        frameListCollapseSourceRef.current = null;
+        frameListExpandAnimatingRef.current = true;
+        frameListPanelRef.current?.expand();
+        setFrameListCollapsed(false);
+
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startSize + (targetSize - startSize) * progress;
+            frameListPanelRef.current?.resize(`${size}%`);
+
+            if (progress < 1) {
+                frameListExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+
+            frameListPanelRef.current?.resize(`${targetSize}%`);
+            frameListExpandAnimatingRef.current = false;
+            frameListExpandAnimationFrameRef.current = null;
+        };
+
+        frameListExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const handleToggleFrameListPanel = () => {
+        if (frameListCollapsed) {
+            expandFrameListPanel();
+            return;
+        }
+        collapseFrameListPanel();
+    };
+
+    const collapseFrameDetailPanel = () => {
+        if (frameDetailCollapsed) {
+            return;
+        }
+        if (frameDetailExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(frameDetailExpandAnimationFrameRef.current);
+            frameDetailExpandAnimationFrameRef.current = null;
+        }
+
+        const currentSize = frameDetailPanelRef.current?.getSize().asPercentage;
+        if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+            lastExpandedFrameDetailSizeRef.current = currentSize;
+        }
+
+        const startPixels = frameDetailPanelRef.current?.getSize().inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const targetPixels = FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+
+        if (startPixels <= targetPixels + 0.5) {
+            frameDetailCollapseSourceRef.current = "button";
+            frameDetailPanelRef.current?.collapse();
+            setFrameDetailCollapsed(true);
+            frameDetailExpandAnimatingRef.current = false;
+            return;
+        }
+
+        frameDetailCollapseSourceRef.current = "button";
+        frameDetailExpandAnimatingRef.current = true;
+
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startPixels + (targetPixels - startPixels) * progress;
+            frameDetailPanelRef.current?.resize(`${size}px`);
+
+            if (progress < 1) {
+                frameDetailExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+
+            frameDetailPanelRef.current?.collapse();
+            setFrameDetailCollapsed(true);
+            frameDetailExpandAnimatingRef.current = false;
+            frameDetailExpandAnimationFrameRef.current = null;
+        };
+
+        frameDetailExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const expandFrameDetailPanel = () => {
+        const targetSize = lastExpandedFrameDetailSizeRef.current;
+        const startSize = frameDetailPanelRef.current?.getSize().asPercentage ?? 0;
+
+        if (frameDetailExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(frameDetailExpandAnimationFrameRef.current);
+            frameDetailExpandAnimationFrameRef.current = null;
+        }
+
+        frameDetailCollapseSourceRef.current = null;
+        frameDetailExpandAnimatingRef.current = true;
+        frameDetailPanelRef.current?.expand();
+        setFrameDetailCollapsed(false);
+
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startSize + (targetSize - startSize) * progress;
+            frameDetailPanelRef.current?.resize(`${size}%`);
+
+            if (progress < 1) {
+                frameDetailExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+
+            frameDetailPanelRef.current?.resize(`${targetSize}%`);
+            frameDetailExpandAnimatingRef.current = false;
+            frameDetailExpandAnimationFrameRef.current = null;
+        };
+
+        frameDetailExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const handleToggleFrameDetailPanel = () => {
+        if (frameDetailCollapsed) {
+            expandFrameDetailPanel();
+            return;
+        }
+        collapseFrameDetailPanel();
+    };
+
+    const handleRightColumnResizeStart = () => {
+        frameRightResizeDraggingRef.current = true;
+
+        const frameListSize = frameListPanelRef.current?.getSize().asPercentage;
+        if (typeof frameListSize === "number" && Number.isFinite(frameListSize) && !frameListCollapsed) {
+            frameListResizeStartSizeRef.current = frameListSize;
+        }
+
+        const frameDetailSize = frameDetailPanelRef.current?.getSize().asPercentage;
+        if (typeof frameDetailSize === "number" && Number.isFinite(frameDetailSize) && !frameDetailCollapsed) {
+            frameDetailResizeStartSizeRef.current = frameDetailSize;
+        }
+    };
+
+    const handleFrameListPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
+        const isActuallyCollapsed = frameListPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
+
+        if (frameListExpandAnimatingRef.current) {
+            setFrameListCollapsed(false);
+            return;
+        }
+
+        if (isActuallyCollapsed) {
+            if (frameRightResizeDraggingRef.current && frameListResizeStartSizeRef.current !== null && frameListCollapseSourceRef.current !== "button") {
+                lastExpandedFrameListSizeRef.current = frameListResizeStartSizeRef.current;
+                frameListCollapseSourceRef.current = "drag";
+            }
+        } else if (frameListCollapseSourceRef.current === null) {
+            lastExpandedFrameListSizeRef.current = panelSize.asPercentage;
+        }
+
+        setFrameListCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
+    };
+
+    const handleFrameDetailPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
+        const isActuallyCollapsed = frameDetailPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
+
+        if (frameDetailExpandAnimatingRef.current) {
+            setFrameDetailCollapsed(false);
+            return;
+        }
+
+        if (isActuallyCollapsed) {
+            if (frameRightResizeDraggingRef.current && frameDetailResizeStartSizeRef.current !== null && frameDetailCollapseSourceRef.current !== "button") {
+                lastExpandedFrameDetailSizeRef.current = frameDetailResizeStartSizeRef.current;
+                frameDetailCollapseSourceRef.current = "drag";
+            }
+        } else if (frameDetailCollapseSourceRef.current === null) {
+            lastExpandedFrameDetailSizeRef.current = panelSize.asPercentage;
+        }
+
+        setFrameDetailCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
+    };
     useEffect(() => {
         const handlePointerUp = () => {
             connectionResizeDraggingRef.current = false;
             connectionResizeStartSizeRef.current = null;
+            frameRightResizeDraggingRef.current = false;
+            frameListResizeStartSizeRef.current = null;
+            frameDetailResizeStartSizeRef.current = null;
         };
         window.addEventListener("pointerup", handlePointerUp);
         return () => window.removeEventListener("pointerup", handlePointerUp);
@@ -752,6 +999,12 @@ function App() {
         return () => {
             if (connectionExpandAnimationFrameRef.current !== null) {
                 cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
+            }
+            if (frameListExpandAnimationFrameRef.current !== null) {
+                cancelAnimationFrame(frameListExpandAnimationFrameRef.current);
+            }
+            if (frameDetailExpandAnimationFrameRef.current !== null) {
+                cancelAnimationFrame(frameDetailExpandAnimationFrameRef.current);
             }
         };
     }, []);
@@ -1423,7 +1676,7 @@ function App() {
     const handleClear = async () => {
         await wsClearFrames();
         setSelectedId(null);
-        setFrameDetailCollapsed(true);
+        collapseFrameDetailPanel();
         resetMicVisuals();
         setPlaybackWaveform([]);
         setPlaybackPositionSec(0);
@@ -2249,9 +2502,9 @@ function App() {
             <Panel
                 panelRef={connectionPanelRef}
                 defaultSize={25}
-                minSize="42px"
+                minSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
                 collapsible
-                collapsedSize="42px"
+                collapsedSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
                 onResize={handleConnectionPanelResize}
             >
                 <ConnectionPanel
@@ -2398,31 +2651,49 @@ function App() {
 
     const rightColumnPanel = (
         <Group orientation="vertical" style={{ flex: 1, minHeight: 0 }}>
-            <Panel defaultSize={50} minSize={25}>
+            <Panel
+                panelRef={frameListPanelRef}
+                defaultSize={50}
+                minSize="42px"
+                collapsible
+                collapsedSize="42px"
+                onResize={handleFrameListPanelResize}
+            >
                 <FrameList
                     frames={frames}
                     selectedId={selectedId}
+                    collapsed={frameListCollapsed}
                     searchText={searchText}
                     directionFilter={directionFilter}
                     typeFilter={typeFilter}
+                    onToggleCollapsed={handleToggleFrameListPanel}
                     onClear={handleClear}
                     onSearchTextChange={setSearchText}
                     onDirectionFilterChange={setDirectionFilter}
                     onTypeFilterChange={setTypeFilter}
                     onSelect={(id) => {
                         setSelectedId(id);
-                        setFrameDetailCollapsed(false);
+                        if (frameDetailCollapsed) {
+                            expandFrameDetailPanel();
+                        }
                     }}
                 />
             </Panel>
-            <Separator className="right-column-resize-handle">
+            <Separator className="right-column-resize-handle" onPointerDown={handleRightColumnResizeStart}>
                 <div className="resize-handle-bar" />
             </Separator>
-            <Panel defaultSize={50} minSize={25}>
+            <Panel
+                panelRef={frameDetailPanelRef}
+                defaultSize={50}
+                minSize="42px"
+                collapsible
+                collapsedSize="42px"
+                onResize={handleFrameDetailPanelResize}
+            >
                 <FrameDetail
                     frame={selectedFrame}
                     collapsed={frameDetailCollapsed}
-                    onToggleCollapsed={() => setFrameDetailCollapsed((prev) => !prev)}
+                    onToggleCollapsed={handleToggleFrameDetailPanel}
                 />
             </Panel>
         </Group>

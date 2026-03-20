@@ -65,7 +65,7 @@ export function ConnectionPanel(props: Props) {
 
   return (
     <form className="panel connection-panel" onSubmit={handleSubmit}>
-      <div className="panel-header">
+      <div className="connection-panel-header">
         <div className="connection-collapsed-left">
           <span className="panel-title">Connection</span>
           {isCollapsed && (
@@ -74,10 +74,22 @@ export function ConnectionPanel(props: Props) {
         </div>
         <div className="connection-collapsed-right">
           {isCollapsed && <span className="status-text">{statusText}</span>}
-          <button type="button" onClick={onToggleCollapsed}>
-            {isCollapsed ? "Expand" : "Collapse"}
-          </button>
         </div>
+        <button
+          type="button"
+          className="connection-collapse-button"
+          aria-label={isCollapsed ? "Expand connection panel" : "Collapse connection panel"}
+          title={isCollapsed ? "Expand" : "Collapse"}
+          onClick={onToggleCollapsed}
+        >
+          <svg
+            className={`collapse-chevron${isCollapsed ? " is-collapsed" : ""}`}
+            viewBox="0 0 12 12"
+            aria-hidden="true"
+          >
+            <path d="M3 4.5L6 7.5L9 4.5" />
+          </svg>
+        </button>
       </div>
       <div className={`connection-body-wrap${isCollapsed ? " collapsed" : ""}`}>
         <div className="connection-body-inner">

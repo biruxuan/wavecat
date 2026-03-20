@@ -486,6 +486,23 @@ button:disabled {
   overflow: auto;
 }
 
+.connection-panel {
+  --connection-collapse-button-size: 24px;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.connection-panel-header {
+  height: 40px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .connection-panel,
 .send-panel,
 .frame-detail-panel,
@@ -498,9 +515,10 @@ button:disabled {
 }
 
 .connection-body-wrap {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-rows: 1fr;
-  transition: grid-template-rows 0.3s ease;
 }
 
 .connection-body-wrap.collapsed {
@@ -512,6 +530,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 8px 10px 10px;
 }
 
 .connection-collapsed-left {
@@ -533,11 +552,66 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   flex-shrink: 0;
+}
+
+.connection-collapsed-right .status-text {
+  white-space: nowrap;
+}
+
+.connection-collapse-button {
+  flex-shrink: 0 !important;
+  width: var(--connection-collapse-button-size);
+  height: var(--connection-collapse-button-size);
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.connection-collapse-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.connection-collapse-button:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.45);
+  outline-offset: 2px;
+}
+
+.collapse-chevron {
+  display: block;
+  width: 24px;
+  height: 24px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform-origin: center;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.collapse-chevron.is-collapsed {
+  transform: rotate(90deg);
 }
 
 .frame-list-panel {
   overflow: hidden;
+}
+
+.frame-list-panel-collapsed {
+  overflow: hidden;
+}
+
+.frame-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .response-panel {

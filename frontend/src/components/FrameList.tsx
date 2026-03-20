@@ -5,9 +5,11 @@ const MAX_RENDER_FRAMES = 500;
 type Props = {
   frames: Frame[];
   selectedId: number | null;
+  collapsed: boolean;
   searchText: string;
   directionFilter: string;
   typeFilter: string;
+  onToggleCollapsed: () => void;
   onSelect: (id: number) => void;
   onClear: () => void;
   onSearchTextChange: (value: string) => void;
@@ -18,9 +20,11 @@ type Props = {
 export function FrameList({
   frames,
   selectedId,
+  collapsed,
   searchText,
   directionFilter,
   typeFilter,
+  onToggleCollapsed,
   onSelect,
   onClear,
   onSearchTextChange,
@@ -38,11 +42,28 @@ export function FrameList({
   const visibleFrames =
     filteredFrames.length > MAX_RENDER_FRAMES ? filteredFrames.slice(-MAX_RENDER_FRAMES) : filteredFrames;
 
+  if (collapsed) {
+    return (
+      <section className="panel frame-list-panel frame-list-panel-collapsed">
+        <div className="panel-header">
+          <div className="panel-title">Frame List</div>
+          <button type="button" onClick={onToggleCollapsed}>
+            Expand
+          </button>
+        </div>
+        <div className="status-text">已过滤 {filteredFrames.length} / 总计 {frames.length}</div>
+      </section>
+    );
+  }
+
   return (
     <section className="panel frame-list-panel">
       <div className="panel-header">
         <div className="panel-title">Frame List</div>
-        <button onClick={onClear}>Clear</button>
+        <div className="frame-list-actions">
+          <button type="button" onClick={onClear}>Clear</button>
+          <button type="button" onClick={onToggleCollapsed}>Collapse</button>
+        </div>
       </div>
       <div className="audio-grid">
         <label className="field">
