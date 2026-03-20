@@ -74,6 +74,7 @@ function App() {
     const [connected, setConnected] = useState(false);
     const [frames, setFrames] = useState<Frame[]>([]);
     const [selectedId, setSelectedId] = useState<number | null>(null);
+    const [frameDetailCollapsed, setFrameDetailCollapsed] = useState(true);
     const [searchText, setSearchText] = useState("");
     const [directionFilter, setDirectionFilter] = useState("all");
     const [typeFilter, setTypeFilter] = useState("all");
@@ -176,6 +177,8 @@ function App() {
     const playbackPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const streamedAudioOperationIdsRef = useRef<Set<string>>(new Set());
     const [playbackWaveform, setPlaybackWaveform] = useState<number[]>([]);
+    const [playbackPositionSec, setPlaybackPositionSec] = useState(0);
+    const playbackPosRafRef = useRef<number | null>(null);
 
     const cloneMiniTranslationHeaderPreset = () =>
         miniTranslationHeaderPreset.map((rule) => ({ ...rule }));
@@ -501,11 +504,7 @@ function App() {
                 const next = [...prev, entry];
                 return next.length > 60 ? next.slice(next.length - 60) : next;
             });
-            const playbackValue = Math.max(0, Math.min(1, Math.max(diag.rms, diag.peak * 0.75)));
-            setPlaybackWaveform((prev) => {
-                const next = [...prev, playbackValue];
-                return next.length > 180 ? next.slice(next.length - 180) : next;
-            });
+            // Played-index is now driven by the RAF loop polling getSmoothedPlaybackIndex()
         };
         return player;
     };
@@ -525,6 +524,8 @@ function App() {
         serverPCMAdaptiveRateEnabled,
         serverPCMAdaptiveRateStrength,
     ]);
+
+
 
     useEffect(() => {
         const clearPinnedOnClick = (event: MouseEvent) => {
@@ -553,6 +554,24 @@ function App() {
         };
     }, []);
 
+    // RAF loop: poll pcmPlayer for smooth playback position in seconds
+    useEffect(() => {
+        const tick = () => {
+            const player = pcmPlayerRef.current;
+            if (player) {
+                setPlaybackPositionSec(player.getPlaybackPositionSec());
+            }
+            playbackPosRafRef.current = requestAnimationFrame(tick);
+        };
+        playbackPosRafRef.current = requestAnimationFrame(tick);
+        return () => {
+            if (playbackPosRafRef.current !== null) {
+                cancelAnimationFrame(playbackPosRafRef.current);
+                playbackPosRafRef.current = null;
+            }
+        };
+    }, []);
+
     const handleToggleAutoPlayServerPCM = async (nextEnabled: boolean) => {
         setAutoPlayServerPCM(nextEnabled);
         if (!nextEnabled) {
@@ -561,8 +580,8 @@ function App() {
                 player.stopNow();
                 setServerPCMPlaying(false);
                 setPlaybackWaveform([]);
-                const playbackState = player.getPlaybackState();
-                setAudioProbe((prev) => ({
+                setPlaybackPositionSec(0);
+                const playbackState = player.getPlaybackState();                setAudioProbe((prev) => ({
                     ...prev,
                     queueLength: playbackState.queueLength,
                     scheduledSources: playbackState.scheduledSources,
@@ -589,6 +608,7 @@ function App() {
         player.stopNow();
         setServerPCMPlaying(false);
         setPlaybackWaveform([]);
+        setPlaybackPositionSec(0);
         const playbackState = player.getPlaybackState();
         setAudioProbe((prev) => ({
             ...prev,
@@ -656,6 +676,15 @@ function App() {
             probeMatched += 1;
             try {
                 lastDiagnostics = await pcmPlayerRef.current.enqueuePCM16Base64(chunk, serverPCMSampleRate, serverPCMChannels);
+                if (lastDiagnostics) {
+                    const amp = Math.sqrt(Math.max(0, Math.min(1, Math.max(lastDiagnostics.rms, lastDiagnostics.peak * 0.75))));
+                    const slotCount = Math.max(1, Math.round(lastDiagnostics.durationMs / 50));
+                    setPlaybackWaveform((prev) => {
+                        const next = prev.slice();
+                        for (let si = 0; si < slotCount; si++) next.push(amp);
+                        return next;
+                    });
+                }
                 if (extracted.eventName === "interim" && extracted.operationId) {
                     streamedAudioOperationIdsRef.current.add(extracted.operationId);
                 }
@@ -1071,6 +1100,15 @@ function App() {
 
     const handleConnect = async () => {
         try {
+            const currentStatus = await wsStatus();
+            if (currentStatus.state === "connected") {
+                setConnected(true);
+                if (!sessionRunnerRef.current && !pendingResponseRef.current) {
+                    updateStatus("already connected");
+                }
+                return;
+            }
+
             const result = await wsConnect({
                 url,
                 headers: parseHeaders(),
@@ -1078,6 +1116,9 @@ function App() {
                 subprotocol: subprotocol.trim(),
             });
             updateStatus(result.message);
+            if (result.success) {
+                setConnected(true);
+            }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             updateStatus(message);
@@ -1122,6 +1163,7 @@ function App() {
         setStreaming(false);
         resetMicVisuals();
         setPlaybackWaveform([]);
+        setPlaybackPositionSec(0);
         lastPlayedInboundFrameIdRef.current = 0;
         lastProcessedTextFrameIdRef.current = 0;
         setLiveAssistantText("");
@@ -1137,8 +1179,10 @@ function App() {
     const handleClear = async () => {
         await wsClearFrames();
         setSelectedId(null);
+        setFrameDetailCollapsed(true);
         resetMicVisuals();
         setPlaybackWaveform([]);
+        setPlaybackPositionSec(0);
         lastPlayedInboundFrameIdRef.current = 0;
         lastProcessedTextFrameIdRef.current = 0;
         setLiveAssistantText("");
@@ -1718,8 +1762,13 @@ function App() {
             error: "",
         });
         try {
-            if (!connected) {
+            const connectionStatus = await wsStatus();
+            if (connectionStatus.state !== "connected") {
                 await handleConnect();
+                const connectedStatus = await wsStatus();
+                if (connectedStatus.state !== "connected") {
+                    throw new Error(connectedStatus.error || `连接失败: ${connectedStatus.state}`);
+                }
             }
 
             const startSnapshot = await wsGetFrames();
@@ -1744,7 +1793,7 @@ function App() {
                 error: "",
             });
             const startedFrame = await waitForInboundEvent(
-                (text) => matchesSessionEvent(text, sessionConfig.profileType, ["started"]),
+                (text) => matchesSessionEvent(text, sessionConfig.profileType, ["started", "start", "session_started"]),
                 15000,
                 startAfterId
             );
@@ -2371,22 +2420,35 @@ function App() {
                         onScrollCollapse={(collapsed) => setConnectionPanelCollapsed(collapsed)}
                         scrollExpandPreset={scrollExpandPreset}
                     />
-                    <ResponsePanel frame={latestInboundFrame} sessionSummary={sessionSummary} liveText={liveAssistantText} />
+                    <ResponsePanel
+                        frame={latestInboundFrame}
+                        sessionSummary={sessionSummary}
+                        liveText={liveAssistantText}
+                        playbackWaveform={playbackWaveform}
+                        playbackPositionSec={playbackPositionSec}
+                    />
                 </div>
-                <div className="right-column">
+                <div className={frameDetailCollapsed ? "right-column frame-detail-collapsed" : "right-column"}>
                     <FrameList
                         frames={frames}
                         selectedId={selectedId}
                         searchText={searchText}
                         directionFilter={directionFilter}
                         typeFilter={typeFilter}
-                        onSelect={setSelectedId}
                         onClear={handleClear}
                         onSearchTextChange={setSearchText}
                         onDirectionFilterChange={setDirectionFilter}
                         onTypeFilterChange={setTypeFilter}
+                        onSelect={(id) => {
+                            setSelectedId(id);
+                            setFrameDetailCollapsed(false);
+                        }}
                     />
-                    <FrameDetail frame={selectedFrame} />
+                    <FrameDetail
+                        frame={selectedFrame}
+                        collapsed={frameDetailCollapsed}
+                        onToggleCollapsed={() => setFrameDetailCollapsed((prev) => !prev)}
+                    />
                 </div>
             </div>
         </div>

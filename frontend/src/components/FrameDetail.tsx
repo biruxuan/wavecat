@@ -3,11 +3,13 @@ import type { Frame } from "../types";
 
 type Props = {
   frame?: Frame;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 };
 
 type TabKey = "summary" | "text" | "hex" | "ascii" | "base64";
 
-export function FrameDetail({ frame }: Props) {
+export function FrameDetail({ frame, collapsed, onToggleCollapsed }: Props) {
   const availableTabs = useMemo(() => {
     if (!frame) {
       return ["summary"] as TabKey[];
@@ -30,10 +32,28 @@ export function FrameDetail({ frame }: Props) {
     setCopyText("Copy");
   }, [availableTabs, frame?.id]);
 
+  if (collapsed) {
+    return (
+      <section className="panel frame-detail-panel frame-detail-panel-collapsed">
+        <div className="panel-header">
+          <div className="panel-title">Frame Detail</div>
+          <button type="button" onClick={onToggleCollapsed}>
+            Expand
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   if (!frame) {
     return (
       <section className="panel frame-detail-panel">
-        <div className="panel-title">Frame Detail</div>
+        <div className="panel-header">
+          <div className="panel-title">Frame Detail</div>
+          <button type="button" onClick={onToggleCollapsed}>
+            Collapse
+          </button>
+        </div>
         <div className="placeholder">Select a frame to inspect details.</div>
       </section>
     );
@@ -64,9 +84,14 @@ export function FrameDetail({ frame }: Props) {
     <section className="panel frame-detail-panel">
       <div className="panel-header">
         <div className="panel-title">Frame Detail</div>
-        <button type="button" onClick={handleCopy} disabled={!currentContent}>
-          {copyText}
-        </button>
+        <div className="frame-detail-actions">
+          <button type="button" onClick={handleCopy} disabled={!currentContent}>
+            {copyText}
+          </button>
+          <button type="button" onClick={onToggleCollapsed}>
+            Collapse
+          </button>
+        </div>
       </div>
       <div className="detail-meta">
         <span>ID: {frame.id}</span>

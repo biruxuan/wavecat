@@ -17,6 +17,12 @@ export type PCMPlaybackState = {
   scheduledSources: number;
 };
 
+export type PCMPlaybackTiming = {
+  remainingSec: number;
+  currentTimeSec: number;
+  nextPlaybackTimeSec: number;
+};
+
 export class RealTimePCMPlayer {
   public onChunkPlaying?: (diag: PCMChunkDiagnostics) => void;
   public onRawBytes?: (bytes: Uint8Array) => void;
@@ -40,6 +46,9 @@ export class RealTimePCMPlayer {
   private adaptiveDeadbandSec = 0.08;
   private adaptiveRateStrength = 1;
   private activeSources = new Set<AudioBufferSourceNode>();
+  private playbackStartTimers = new Set<number>();
+  private chunkSchedule: Array<{ startSec: number; endSec: number; audioDurSec: number }> = [];
+  private totalEnqueuedDurationSec = 0;
 
   setMaxScheduledSources(value: number) {
     const next = Number.isFinite(value) ? Math.floor(value) : 2;
@@ -212,6 +221,7 @@ export class RealTimePCMPlayer {
 
     this.queue.push({ buffer: audioBuffer, diagnostics });
     this.queuedDurationSec += audioBuffer.duration;
+    this.totalEnqueuedDurationSec += audioBuffer.duration;
     if (this.maxQueueLength > 0 && this.queue.length > this.maxQueueLength) {
       const overflow = this.queue.length - this.maxQueueLength;
       for (let i = 0; i < overflow; i += 1) {
@@ -232,7 +242,28 @@ export class RealTimePCMPlayer {
     };
   }
 
+  getPlaybackTiming(): PCMPlaybackTiming {
+    if (!this.audioContext) {
+      return {
+        remainingSec: 0,
+        currentTimeSec: 0,
+        nextPlaybackTimeSec: 0,
+      };
+    }
+    const current = this.audioContext.currentTime;
+    return {
+      remainingSec: Math.max(0, this.nextPlaybackTime - current),
+      currentTimeSec: current,
+      nextPlaybackTimeSec: this.nextPlaybackTime,
+    };
+  }
+
   stopNow() {
+    for (const timer of this.playbackStartTimers) {
+      window.clearTimeout(timer);
+    }
+    this.playbackStartTimers.clear();
+
     for (const source of this.activeSources) {
       try {
         source.onended = null;
@@ -250,6 +281,8 @@ export class RealTimePCMPlayer {
     this.queuedDurationSec = 0;
     this.scheduledSources = 0;
     this.lastFormatKey = "";
+    this.chunkSchedule = [];
+    this.totalEnqueuedDurationSec = 0;
 
     if (this.audioContext) {
       this.nextPlaybackTime = this.audioContext.currentTime;
@@ -283,20 +316,30 @@ export class RealTimePCMPlayer {
       }
       this.queuedDurationSec = Math.max(0, this.queuedDurationSec - next.buffer.duration);
 
-      this.onChunkPlaying?.(next.diagnostics);
-
       const source = context.createBufferSource();
       source.buffer = next.buffer;
       source.playbackRate.value = batchRate;
       source.connect(context.destination);
 
       const playAt = Math.max(context.currentTime + 0.005, this.nextPlaybackTime);
+      const startDelayMs = Math.max(0, (playAt - context.currentTime) * 1000);
+      const playbackStartTimer = window.setTimeout(() => {
+        this.playbackStartTimers.delete(playbackStartTimer);
+        this.onChunkPlaying?.(next.diagnostics);
+      }, startDelayMs);
+      this.playbackStartTimers.add(playbackStartTimer);
+
       source.start(playAt);
       this.nextPlaybackTime = playAt + next.buffer.duration / source.playbackRate.value;
+      this.chunkSchedule.push({ startSec: playAt, endSec: this.nextPlaybackTime, audioDurSec: next.buffer.duration });
       this.scheduledSources += 1;
       this.activeSources.add(source);
 
       source.onended = () => {
+        if (this.playbackStartTimers.has(playbackStartTimer)) {
+          window.clearTimeout(playbackStartTimer);
+          this.playbackStartTimers.delete(playbackStartTimer);
+        }
         this.activeSources.delete(source);
         this.scheduledSources = Math.max(0, this.scheduledSources - 1);
         if (this.scheduledSources === 0 && this.queue.length === 0) {
@@ -325,6 +368,41 @@ export class RealTimePCMPlayer {
     const dynamicMax = Math.min(1.015, 1 + baseStep);
     const clampedByDynamic = Math.max(dynamicMin, Math.min(dynamicMax, rate));
     return Math.max(this.adaptiveRateMin, Math.min(this.adaptiveRateMax, clampedByDynamic));
+  }
+
+  getSmoothedPlaybackIndex(): number {
+    if (!this.audioContext || this.chunkSchedule.length === 0) return 0;
+    const now = this.audioContext.currentTime;
+    for (let i = 0; i < this.chunkSchedule.length; i++) {
+      const chunk = this.chunkSchedule[i];
+      if (now < chunk.startSec) {
+        return i;
+      }
+      if (now < chunk.endSec) {
+        const frac = (now - chunk.startSec) / Math.max(0.001, chunk.endSec - chunk.startSec);
+        return i + Math.min(1, frac);
+      }
+    }
+    return this.chunkSchedule.length;
+  }
+
+  getPlaybackPositionSec(): number {
+    if (!this.audioContext || this.chunkSchedule.length === 0) return 0;
+    const now = this.audioContext.currentTime;
+    let accum = 0;
+    for (const chunk of this.chunkSchedule) {
+      if (now < chunk.startSec) return accum;
+      if (now < chunk.endSec) {
+        const frac = (now - chunk.startSec) / Math.max(0.001, chunk.endSec - chunk.startSec);
+        return accum + frac * chunk.audioDurSec;
+      }
+      accum += chunk.audioDurSec;
+    }
+    return accum;
+  }
+
+  getTotalEnqueuedDurationSec(): number {
+    return this.totalEnqueuedDurationSec;
   }
 
   private base64ToBytes(base64: string) {
