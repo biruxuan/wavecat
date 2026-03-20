@@ -6,6 +6,7 @@ import { SendPanelWizard } from "./SendPanelWizard";
 import { StickyActions } from "./SendPanelWizard/StickyActions";
 
 export function SendPanel(props: Props) {
+  const { collapsed = false, onToggleCollapsed, ...rest } = props;
   const MOBILE_BREAKPOINT = 700;
   const [currentStep, setCurrentStepRaw] = useState(1);
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set());
@@ -29,7 +30,7 @@ export function SendPanel(props: Props) {
   };
 
   const ctx: SendPanelContextValue = {
-    ...props,
+    ...rest,
     currentStep,
     setCurrentStep,
     completedSteps,
@@ -46,31 +47,55 @@ export function SendPanel(props: Props) {
   return (
     <SendPanelContext.Provider value={ctx}>
       <section className="panel send-panel-wizard">
-        {compactLayout ? (
-          <div className="send-panel-wizard-mobile">
-            <div className="send-panel-wizard-mobile-main">
-              <SendPanelWizard />
-            </div>
-            <div className="send-panel-wizard-mobile-sticky">
-              <StickyActions />
-            </div>
+        <div className="send-panel-header">
+          <div className="panel-title">Send</div>
+          {onToggleCollapsed && (
+            <button
+              type="button"
+              className="connection-collapse-button"
+              aria-label={collapsed ? "Expand send panel" : "Collapse send panel"}
+              title={collapsed ? "Expand" : "Collapse"}
+              onClick={onToggleCollapsed}
+            >
+              <svg
+                className={`collapse-chevron${collapsed ? " is-collapsed" : ""}`}
+                viewBox="0 0 12 12"
+                aria-hidden="true"
+              >
+                <path d="M3 4.5L6 7.5L9 4.5" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <div className={`send-body-wrap${collapsed ? " collapsed" : ""}`}>
+          <div className="send-body-inner">
+            {compactLayout ? (
+              <div className="send-panel-wizard-mobile">
+                <div className="send-panel-wizard-mobile-main">
+                  <SendPanelWizard />
+                </div>
+                <div className="send-panel-wizard-mobile-sticky">
+                  <StickyActions />
+                </div>
+              </div>
+            ) : (
+              <Group
+                orientation="horizontal"
+                style={{ flex: 1, minHeight: 0 }}
+              >
+                <Panel defaultSize={60} minSize={30}>
+                  <SendPanelWizard />
+                </Panel>
+                <Separator className="send-panel-resize-handle">
+                  <div className="resize-handle-bar" />
+                </Separator>
+                <Panel defaultSize={40} minSize={25}>
+                  <StickyActions />
+                </Panel>
+              </Group>
+            )}
           </div>
-        ) : (
-          <Group
-            orientation="horizontal"
-            style={{ flex: 1, minHeight: 0 }}
-          >
-            <Panel defaultSize={60} minSize={30}>
-              <SendPanelWizard />
-            </Panel>
-            <Separator className="send-panel-resize-handle">
-              <div className="resize-handle-bar" />
-            </Separator>
-            <Panel defaultSize={40} minSize={25}>
-              <StickyActions />
-            </Panel>
-          </Group>
-        )}
+        </div>
       </section>
     </SendPanelContext.Provider>
   );

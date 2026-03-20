@@ -67,7 +67,9 @@ export type Props = {
   onStopMicStream: () => void;
   onScrollCollapse?: (collapsed: boolean) => void;
   scrollExpandPreset: ScrollExpandPreset;
-};
+    collapsed?: boolean;
+    onToggleCollapsed?: () => void;
+  };
 
 export function SendPanelClassic({
   textPayload,

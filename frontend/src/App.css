@@ -357,10 +357,6 @@
   overflow: hidden;
 }
 
-.right-column.frame-detail-collapsed {
-  /* Resizable panels handle sizing */
-}
-
 @media (max-width: 1320px) {
   .left-column,
   .right-column {
@@ -711,6 +707,39 @@ button:disabled {
   padding: 8px 10px 10px;
 }
 
+.send-panel-wizard {
+  overflow: hidden;
+  padding: 0;
+  gap: 0;
+}
+
+.send-body-wrap {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.send-body-wrap.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.send-body-inner {
+  overflow: hidden;
+  display: flex;
+  min-height: 0;
+}
+
+.send-panel-header {
+  height: 40px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .live-text-block {
   margin-bottom: 12px;
 }
@@ -883,10 +912,7 @@ tr.selected {
    Send Panel Wizard Layout
    ─────────────────────────────────────────────────────────────── */
 
-.send-panel-wizard {
-  overflow: hidden;
-  padding: 0;
-}
+
 
 .send-panel-wizard-mobile {
   display: grid;

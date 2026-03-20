@@ -150,6 +150,20 @@ function App() {
     const responseExpandAnimationFrameRef = useRef<number | null>(null);
     const responseCollapseSourceRef = useRef<"button" | "drag" | null>(null);
     const frameRightResizeDraggingRef = useRef(false);
+    const [sendPanelCollapsed, setSendPanelCollapsed] = useState(false);
+    const sendPanelRef = useRef<PanelImperativeHandle | null>(null);
+    const lastExpandedSendSizeRef = useRef(35);
+    const sendResizeStartSizeRef = useRef<number | null>(null);
+    const sendResizeDraggingRef = useRef(false);
+    const sendExpandAnimatingRef = useRef(false);
+    const sendExpandAnimationFrameRef = useRef<number | null>(null);
+    const sendCollapseSourceRef = useRef<"button" | "drag" | null>(null);
+    const lowerSeparatorDragActiveRef = useRef(false);
+    const lowerSeparatorSendCollapsedAtStartRef = useRef(false);
+    const lowerSeparatorAllowConnectionCascadeRef = useRef(false);
+    const lowerSeparatorLockAfterSendCollapsedRef = useRef(false);
+    const lowerSeparatorLockedResponseSizeRef = useRef<number | null>(null);
+    const lowerSeparatorConnectionSizeAtStartRef = useRef<number | null>(null);
     const [scrollExpandPreset, setScrollExpandPreset] = useState<"sensitive" | "stable">("sensitive");
     const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
     const [serverPCMSampleRate, setServerPCMSampleRate] = useState(16000);
@@ -730,6 +744,7 @@ function App() {
     };
 
     const handleConnectionResizeStart = () => {
+        lowerSeparatorDragActiveRef.current = false;
         connectionResizeDraggingRef.current = true;
         if (!connectionPanelCollapsed) {
             // 场景2: 拖拽开始 → 记录此刻高度，如果这次拖拽导致折叠则 expand 恢复到这里
@@ -744,6 +759,17 @@ function App() {
         const isActuallyCollapsed = connectionPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
 
         if (connectionExpandAnimatingRef.current) {
+            setConnectionPanelCollapsed(false);
+            return;
+        }
+
+        if (lowerSeparatorDragActiveRef.current && !lowerSeparatorAllowConnectionCascadeRef.current) {
+            const lockedSize =
+                lowerSeparatorConnectionSizeAtStartRef.current ??
+                (connectionPanelCollapsed ? null : lastExpandedConnectionSizeRef.current);
+            if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
+                connectionPanelRef.current?.resize(`${lockedSize}%`);
+            }
             setConnectionPanelCollapsed(false);
             return;
         }
@@ -992,6 +1018,119 @@ function App() {
         setFrameDetailCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
     };
 
+    const handleSendResizeStart = () => {
+        sendResizeDraggingRef.current = true;
+        if (!sendPanelCollapsed) {
+            const currentSize = sendPanelRef.current?.getSize().asPercentage;
+            if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+                sendResizeStartSizeRef.current = currentSize;
+            }
+        }
+    };
+
+    const collapseSendPanel = () => {
+        if (sendPanelCollapsed) return;
+        if (sendExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(sendExpandAnimationFrameRef.current);
+            sendExpandAnimationFrameRef.current = null;
+        }
+        const currentSize = sendPanelRef.current?.getSize().asPercentage;
+        if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+            lastExpandedSendSizeRef.current = currentSize;
+        }
+        const startPixels = sendPanelRef.current?.getSize().inPixels ?? CONNECTION_COLLAPSED_HEIGHT_PX;
+        const targetPixels = CONNECTION_COLLAPSED_HEIGHT_PX;
+        if (startPixels <= targetPixels + 0.5) {
+            sendCollapseSourceRef.current = "button";
+            sendPanelRef.current?.collapse();
+            setSendPanelCollapsed(true);
+            sendExpandAnimatingRef.current = false;
+            return;
+        }
+        sendCollapseSourceRef.current = "button";
+        sendExpandAnimatingRef.current = true;
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startPixels + (targetPixels - startPixels) * progress;
+            sendPanelRef.current?.resize(`${size}px`);
+            if (progress < 1) {
+                sendExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+            sendPanelRef.current?.collapse();
+            setSendPanelCollapsed(true);
+            sendExpandAnimatingRef.current = false;
+            sendExpandAnimationFrameRef.current = null;
+        };
+        sendExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const expandSendPanel = () => {
+        const targetSize = lastExpandedSendSizeRef.current;
+        const startSize = sendPanelRef.current?.getSize().asPercentage ?? 0;
+        if (sendExpandAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(sendExpandAnimationFrameRef.current);
+            sendExpandAnimationFrameRef.current = null;
+        }
+        sendCollapseSourceRef.current = null;
+        sendExpandAnimatingRef.current = true;
+        sendPanelRef.current?.expand();
+        setSendPanelCollapsed(false);
+        const animate = (now: number, startTime: number) => {
+            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const size = startSize + (targetSize - startSize) * progress;
+            sendPanelRef.current?.resize(`${size}%`);
+            if (progress < 1) {
+                sendExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+                return;
+            }
+            sendPanelRef.current?.resize(`${targetSize}%`);
+            sendExpandAnimatingRef.current = false;
+            sendExpandAnimationFrameRef.current = null;
+        };
+        sendExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+    };
+
+    const handleToggleSendPanel = () => {
+        if (sendPanelCollapsed) {
+            expandSendPanel();
+            return;
+        }
+        collapseSendPanel();
+    };
+
+    const handleSendPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
+        const isActuallyCollapsed = sendPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
+        if (sendExpandAnimatingRef.current) {
+            setSendPanelCollapsed(false);
+            return;
+        }
+
+        if (
+            lowerSeparatorDragActiveRef.current &&
+            !lowerSeparatorSendCollapsedAtStartRef.current &&
+            !lowerSeparatorLockAfterSendCollapsedRef.current &&
+            isActuallyCollapsed
+        ) {
+            lowerSeparatorLockAfterSendCollapsedRef.current = true;
+            const lockedResponse = responsePanelRef.current?.getSize().asPercentage;
+            if (typeof lockedResponse === "number" && Number.isFinite(lockedResponse)) {
+                lowerSeparatorLockedResponseSizeRef.current = lockedResponse;
+            }
+            lowerSeparatorAllowConnectionCascadeRef.current = false;
+        }
+
+        if (isActuallyCollapsed) {
+            if (sendResizeDraggingRef.current && sendResizeStartSizeRef.current !== null && sendCollapseSourceRef.current !== "button") {
+                lastExpandedSendSizeRef.current = sendResizeStartSizeRef.current;
+                sendCollapseSourceRef.current = "drag";
+            }
+        } else if (sendCollapseSourceRef.current === null) {
+            lastExpandedSendSizeRef.current = panelSize.asPercentage;
+        }
+        setSendPanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
+    };
+
     const handleResponseResizeStart = () => {
         responseResizeDraggingRef.current = true;
         if (!responsePanelCollapsed) {
@@ -1000,6 +1139,16 @@ function App() {
                 responseResizeStartSizeRef.current = currentSize;
             }
         }
+
+        lowerSeparatorDragActiveRef.current = true;
+        lowerSeparatorSendCollapsedAtStartRef.current = sendPanelCollapsed;
+        lowerSeparatorAllowConnectionCascadeRef.current = sendPanelCollapsed;
+        lowerSeparatorLockAfterSendCollapsedRef.current = false;
+        lowerSeparatorLockedResponseSizeRef.current = null;
+
+        const connectionSize = connectionPanelRef.current?.getSize().asPercentage;
+        lowerSeparatorConnectionSizeAtStartRef.current =
+            typeof connectionSize === "number" && Number.isFinite(connectionSize) ? connectionSize : null;
     };
 
     const collapseResponsePanel = () => {
@@ -1079,6 +1228,19 @@ function App() {
             setResponsePanelCollapsed(false);
             return;
         }
+
+        if (
+            lowerSeparatorDragActiveRef.current &&
+            lowerSeparatorLockAfterSendCollapsedRef.current &&
+            !lowerSeparatorAllowConnectionCascadeRef.current
+        ) {
+            const lockedSize = lowerSeparatorLockedResponseSizeRef.current;
+            if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
+                responsePanelRef.current?.resize(`${lockedSize}%`);
+            }
+            return;
+        }
+
         if (isActuallyCollapsed) {
             if (responseResizeDraggingRef.current && responseResizeStartSizeRef.current !== null && responseCollapseSourceRef.current !== "button") {
                 lastExpandedResponseSizeRef.current = responseResizeStartSizeRef.current;
@@ -1099,6 +1261,14 @@ function App() {
             frameRightResizeDraggingRef.current = false;
             frameListResizeStartSizeRef.current = null;
             frameDetailResizeStartSizeRef.current = null;
+            sendResizeDraggingRef.current = false;
+            sendResizeStartSizeRef.current = null;
+            lowerSeparatorDragActiveRef.current = false;
+            lowerSeparatorSendCollapsedAtStartRef.current = false;
+            lowerSeparatorAllowConnectionCascadeRef.current = false;
+            lowerSeparatorLockAfterSendCollapsedRef.current = false;
+            lowerSeparatorLockedResponseSizeRef.current = null;
+            lowerSeparatorConnectionSizeAtStartRef.current = null;
         };
         window.addEventListener("pointerup", handlePointerUp);
         return () => window.removeEventListener("pointerup", handlePointerUp);
@@ -1118,6 +1288,9 @@ function App() {
             if (responseExpandAnimationFrameRef.current !== null) {
                 cancelAnimationFrame(responseExpandAnimationFrameRef.current);
             }
+                if (sendExpandAnimationFrameRef.current !== null) {
+                    cancelAnimationFrame(sendExpandAnimationFrameRef.current);
+                }
         };
     }, []);
 
@@ -2641,10 +2814,17 @@ function App() {
                     onSaveCurrentConnection={handleSaveCurrentConnection}
                 />
             </Panel>
-            <Separator className="left-column-resize-handle" onPointerDown={handleConnectionResizeStart}>
+            <Separator className="left-column-resize-handle" onPointerDown={() => { handleConnectionResizeStart(); handleSendResizeStart(); }}>
                 <div className="resize-handle-bar" />
             </Separator>
-            <Panel defaultSize={35} minSize={20}>
+            <Panel
+                panelRef={sendPanelRef}
+                defaultSize={35}
+                minSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
+                collapsible
+                collapsedSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
+                onResize={handleSendPanelResize}
+            >
                 <SendPanel
                     textPayload={textPayload}
                     binaryPayload={binaryPayload}
@@ -2743,9 +2923,11 @@ function App() {
                         expandConnectionPanel();
                     }}
                     scrollExpandPreset={scrollExpandPreset}
+                    collapsed={sendPanelCollapsed}
+                    onToggleCollapsed={handleToggleSendPanel}
                 />
             </Panel>
-            <Separator className="left-column-resize-handle" onPointerDown={handleResponseResizeStart}>
+            <Separator className="left-column-resize-handle" onPointerDown={() => { handleSendResizeStart(); handleResponseResizeStart(); }}>
                 <div className="resize-handle-bar" />
             </Separator>
             <Panel
