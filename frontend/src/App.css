@@ -522,9 +522,10 @@ button:disabled {
 }
 
 .connection-body-inner {
-  overflow: hidden;
+  overflow: hidden auto;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   gap: 8px;
   padding: 8px 10px 10px;
 }

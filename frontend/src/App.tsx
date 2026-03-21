@@ -191,6 +191,7 @@ function App() {
     const lowerSeparatorLockedResponseSizeRef = useRef<number | null>(null);
     const lowerSeparatorConnectionSizeAtStartRef = useRef<number | null>(null);
     const lowerSeparatorConnectionPixelsAtStartRef = useRef<number | null>(null);
+    const lowerSeparatorConnectionCollapsedAtStartRef = useRef(false);
     const lowerSeparatorPendingConnectionExpandRef = useRef(false);
     const lowerSeparatorLastPointerYRef = useRef<number | null>(null);
     const lowerSeparatorLastPointerTimeRef = useRef<number | null>(null);
@@ -1072,20 +1073,15 @@ function App() {
         if (lowerSeparatorDragActiveRef.current && lowerSeparatorAllowConnectionCascadeRef.current) {
             setResizeDebugBranch("drag-cascade");
             if (lowerSeparatorCascadeTriggeredRef.current) {
-                const collapsedPercent = getConnectionCollapsedSizePercent();
-                if (!isActuallyCollapsed || panelSize.inPixels > CONNECTION_COLLAPSED_HEIGHT_PX + CONNECTION_COLLAPSED_EPSILON_PX) {
-                    connectionPanelRef.current?.resize(`${collapsedPercent}%`);
-                    connectionPanelRef.current?.collapse();
-                    setConnectionPanelCollapsed(true);
-                    return;
+                if (isActuallyCollapsed && !connectionPanelCollapsed) {
+                    const restoreSize = connectionResizeStartSizeRef.current ?? lastExpandedConnectionSizeRef.current;
+                    if (typeof restoreSize === "number" && Number.isFinite(restoreSize) && restoreSize > 1) {
+                        lastExpandedConnectionSizeRef.current = restoreSize;
+                    }
+                    collapseSourceRef.current = "drag";
                 }
-            }
-            if (lowerSeparatorCascadeTriggeredRef.current && !connectionPanelCollapsed) {
-                const restoreSize = connectionResizeStartSizeRef.current ?? lastExpandedConnectionSizeRef.current;
-                if (typeof restoreSize === "number" && Number.isFinite(restoreSize) && restoreSize > 1) {
-                    lastExpandedConnectionSizeRef.current = restoreSize;
-                }
-                collapseSourceRef.current = "drag";
+                setConnectionPanelCollapsed(isActuallyCollapsed);
+                return;
             }
             setConnectionPanelCollapsed(isActuallyCollapsed);
             return;
@@ -1560,6 +1556,7 @@ function App() {
         const connectionPixels = connectionPanelRef.current?.getSize().inPixels;
         lowerSeparatorConnectionPixelsAtStartRef.current =
             typeof connectionPixels === "number" && Number.isFinite(connectionPixels) ? connectionPixels : null;
+        lowerSeparatorConnectionCollapsedAtStartRef.current = isConnectionPhysicallyCollapsed();
         lowerSeparatorPendingConnectionExpandRef.current = false;
         setConnectionLowerSeparatorMinPercent(null);
         setConnectionLowerSeparatorLockActive(false);
@@ -1625,20 +1622,46 @@ function App() {
                             lowerSeparatorUpwardTravelRef.current += -deltaY;
                             lowerSeparatorUpwardFastStreakRef.current += 1;
                         } else if (deltaY >= LOWER_SEPARATOR_POINTER_MIN_DOWNWARD_RELEASE_DELTA_PX) {
-                            // 只有明确向下回拖时才取消级联，避免手抖或布局采样噪声造成反复锁定/释放
-                            lowerSeparatorUpwardTravelRef.current = 0;
-                            lowerSeparatorUpwardFastStreakRef.current = 0;
                             if (lowerSeparatorCascadeTriggeredRef.current) {
-                                // 取消 cascade 状态
+                                const currentResponseSize = responsePanelRef.current?.getSize().asPercentage ?? 0;
+                                const lockedResponseSize = lowerSeparatorLockedResponseSizeRef.current;
+                                const reachedResponseRestorePoint =
+                                    typeof lockedResponseSize === "number" &&
+                                    Number.isFinite(lockedResponseSize) &&
+                                    currentResponseSize <= lockedResponseSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
+
+                                // 阶段1：先恢复 response 到锁定前大小，保持 send 折叠。
+                                if (!reachedResponseRestorePoint) {
+                                    const sendCollapsedPercent = getSendCollapsedSizePercent();
+                                    sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
+                                    sendPanelRef.current?.collapse();
+                                    setSendPanelCollapsed(true);
+                                    return;
+                                }
+
+                                // 阶段2：达到恢复点后释放级联，允许继续下拖展开 send；
+                                // 若拖拽开始前 send/connection 已折叠，则优先展开其对应面板。
                                 lowerSeparatorCascadeTriggeredRef.current = false;
                                 lowerSeparatorAllowConnectionCascadeRef.current = false;
                                 lowerSeparatorPendingConnectionExpandRef.current = true;
-                                
-                                // 释放硬锁定，允许 response 自由调整
                                 lowerSeparatorHardLockedRef.current = false;
+                                lowerSeparatorLockAfterSendCollapsedRef.current = false;
+
+                                if (lowerSeparatorSendCollapsedAtStartRef.current) {
+                                    sendPanelRef.current?.expand();
+                                    setSendPanelCollapsed(false);
+                                }
+                                if (lowerSeparatorConnectionCollapsedAtStartRef.current) {
+                                    connectionPanelRef.current?.expand();
+                                    setConnectionPanelCollapsed(false);
+                                }
+
                                 lowerSeparatorLockedResponseSizeRef.current = null;
-                                // 只重置状态，不要强制展开，继续拖动会自然导出panels
                             }
+
+                            // 只有明确向下回拖时重置速度追踪
+                            lowerSeparatorUpwardTravelRef.current = 0;
+                            lowerSeparatorUpwardFastStreakRef.current = 0;
                         } else if (deltaY > 0) {
                             lowerSeparatorUpwardFastStreakRef.current = 0;
                         } else {
@@ -1675,7 +1698,7 @@ function App() {
                             responseSize: responsePanelRef.current?.getSize(),
                             triggerMode: shouldTriggerCascadeWithoutSpeedGate ? "send-collapsed-no-speed-gate" : "speed-gated",
                         });
-                        lowerSeparatorAllowConnectionCascadeRef.current = false;
+                        lowerSeparatorAllowConnectionCascadeRef.current = true;
                         lowerSeparatorCascadeTriggeredRef.current = true;
                         lowerSeparatorPendingConnectionExpandRef.current = false;
                         flushSync(() => {
@@ -1709,7 +1732,6 @@ function App() {
                             if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
                                 lastExpandedConnectionSizeRef.current = currentSize;
                             }
-                            collapseConnectionPanel("drag");
                         }
                     }
                 }
@@ -1819,6 +1841,28 @@ function App() {
             lowerSeparatorDragActiveRef.current &&
             (lowerSeparatorCascadeTriggeredRef.current || lowerSeparatorLockAfterSendCollapsedRef.current)
         ) {
+            if (lowerSeparatorCascadeTriggeredRef.current) {
+                const lockedSize = lowerSeparatorLockedResponseSizeRef.current;
+                if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
+                    const hasReachedRestorePoint = panelSize.asPercentage <= lockedSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
+                    if (!hasReachedRestorePoint) {
+                        const sendCollapsedPercent = getSendCollapsedSizePercent();
+                        if (!isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX)) {
+                            sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
+                            sendPanelRef.current?.collapse();
+                            setSendPanelCollapsed(true);
+                        }
+                        return;
+                    }
+
+                    lowerSeparatorCascadeTriggeredRef.current = false;
+                    lowerSeparatorAllowConnectionCascadeRef.current = false;
+                    lowerSeparatorHardLockedRef.current = false;
+                    lowerSeparatorLockAfterSendCollapsedRef.current = false;
+                    lowerSeparatorLockedResponseSizeRef.current = null;
+                }
+            }
+
             if (lowerSeparatorLockAfterSendCollapsedRef.current && !lowerSeparatorCascadeTriggeredRef.current) {
                 const lockedSize = lowerSeparatorLockedResponseSizeRef.current;
                 if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
@@ -1898,6 +1942,7 @@ function App() {
             lowerSeparatorLockedResponseSizeRef.current = null;
             lowerSeparatorConnectionSizeAtStartRef.current = null;
             lowerSeparatorConnectionPixelsAtStartRef.current = null;
+            lowerSeparatorConnectionCollapsedAtStartRef.current = false;
             lowerSeparatorPendingConnectionExpandRef.current = false;
             lowerSeparatorLastPointerYRef.current = null;
             lowerSeparatorLastPointerTimeRef.current = null;
