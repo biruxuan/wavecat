@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { Group, Panel, Separator, type PanelImperativeHandle } from "react-resizable-panels";
 import "./App.css";
 import { ConnectionPanel } from "./components/ConnectionPanel";
@@ -9,6 +10,9 @@ import { SendPanel } from "./components/SendPanel";
 import { useMicStream } from "./hooks/useMicStream";
 import { RealTimePCMPlayer, type PCMChunkDiagnostics } from "./services/pcmPlayer";
 import {
+    wsDebugClearLowerSeparatorLog,
+    wsDebugLowerSeparatorLogPath,
+    wsDebugWriteLowerSeparatorLog,
     wsClearFrames,
     wsConnect,
     wsDisconnect,
@@ -30,6 +34,7 @@ import type { AudioFileInfo, AudioHeaderFieldRule, AudioStreamStatus, Frame, Ses
 
 function App() {
     const MAIN_SPLIT_BREAKPOINT = 1320;
+    const LOWER_SEPARATOR_DEBUG_STORAGE_KEY = "wavecat.lowerSeparatorDebug";
     const miniTranslationHeaderPreset = [
         { name: "magic", type: "uint16", length: 2, endian: "big", defaultValue: "43605", rule: "default" },
         { name: "version", type: "uint8", length: 1, endian: "big", defaultValue: "1", rule: "default" },
@@ -119,14 +124,29 @@ function App() {
     const [audioFileInfo, setAudioFileInfo] = useState<AudioFileInfo | undefined>(undefined);
     const [connectionPanelCollapsed, setConnectionPanelCollapsed] = useState(false);
     const connectionPanelRef = useRef<PanelImperativeHandle | null>(null);
-    const PANEL_COLLAPSE_ANIMATION_MS = 180;
+    const PANEL_COLLAPSE_ANIMATION_MS = 205;
+    const PANEL_DRAG_SOFT_ZONE_PERCENT = 0.6;
+    const PANEL_DRAG_CLAMP_EPSILON_PERCENT = 0.08;
+    const DEFAULT_LOWER_SEPARATOR_POINTER_SPEED_ADJUSTABLE_THRESHOLD_PX_PER_MS = 1.2;
+    const DEFAULT_LOWER_SEPARATOR_POINTER_MIN_TRIGGER_SPEED_PX_PER_MS = 0.8;
+    const LOWER_SEPARATOR_POINTER_MIN_SAMPLE_TIME_MS = 8;
+    const LOWER_SEPARATOR_POINTER_MIN_UPWARD_DELTA_PX = 2;
+    const LOWER_SEPARATOR_POINTER_MIN_TRIGGER_TRAVEL_PX = 18;
+    const LOWER_SEPARATOR_POINTER_MIN_TRIGGER_STREAK = 2;
+    const LOWER_SEPARATOR_POINTER_SPEED_EMA_ALPHA = 0.35;
+    const CONNECTION_EXPAND_VISUAL_BUFFER_PX = 18;
     const CONNECTION_COLLAPSED_HEIGHT_PX = 42;
+    const PANEL_MIN_GAP_PX = 1;
     const FRAME_PANEL_COLLAPSED_HEIGHT_PX = 42;
+    const [connectionLowerSeparatorMinPercent, setConnectionLowerSeparatorMinPercent] = useState<number | null>(null);
+    const [connectionLowerSeparatorLockActive, setConnectionLowerSeparatorLockActive] = useState(false);
     const lastExpandedConnectionSizeRef = useRef(25);
     const connectionResizeStartSizeRef = useRef<number | null>(null);
     const connectionResizeDraggingRef = useRef(false);
     const connectionExpandAnimatingRef = useRef(false);
     const connectionExpandAnimationFrameRef = useRef<number | null>(null);
+    const connectionCollapseAnimatingRef = useRef(false);
+    const connectionCollapseAnimationFrameRef = useRef<number | null>(null);
     const collapseSourceRef = useRef<"button" | "drag" | null>(null);
     const [frameListCollapsed, setFrameListCollapsed] = useState(false);
     const frameListPanelRef = useRef<PanelImperativeHandle | null>(null);
@@ -161,10 +181,109 @@ function App() {
     const lowerSeparatorDragActiveRef = useRef(false);
     const lowerSeparatorSendCollapsedAtStartRef = useRef(false);
     const lowerSeparatorAllowConnectionCascadeRef = useRef(false);
+    const lowerSeparatorCascadeTriggeredRef = useRef(false);
     const lowerSeparatorLockAfterSendCollapsedRef = useRef(false);
+    const lowerSeparatorHardLockedRef = useRef(false);
     const lowerSeparatorLockedResponseSizeRef = useRef<number | null>(null);
     const lowerSeparatorConnectionSizeAtStartRef = useRef<number | null>(null);
+    const lowerSeparatorConnectionPixelsAtStartRef = useRef<number | null>(null);
+    const lowerSeparatorPendingConnectionExpandRef = useRef(false);
+    const lowerSeparatorLastPointerYRef = useRef<number | null>(null);
+    const lowerSeparatorLastPointerTimeRef = useRef<number | null>(null);
+    const lowerSeparatorSpeedEmaRef = useRef<number | null>(null);
+    const lowerSeparatorUpwardTravelRef = useRef(0);
+    const lowerSeparatorUpwardFastStreakRef = useRef(0);
+    const lowerSeparatorPointerMoveHandlerRef = useRef<((e: PointerEvent) => void) | null>(null);
+    const [lowerSeparatorDragInProgress, setLowerSeparatorDragInProgress] = useState(false);
+    const lowerSeparatorMoveSampleCountRef = useRef(0);
+    const connectionResizeDebugLastBranchRef = useRef<"animating-collapse" | "animating-expand" | "drag-cascade" | "drag-blocked" | "normal" | null>(null);
+    const connectionResizeDebugLastCollapsedRef = useRef<boolean | null>(null);
     const [scrollExpandPreset, setScrollExpandPreset] = useState<"sensitive" | "stable">("sensitive");
+    const [lowerSeparatorPointerSpeedAdjustableThreshold, setLowerSeparatorPointerSpeedAdjustableThreshold] = useState(
+        DEFAULT_LOWER_SEPARATOR_POINTER_SPEED_ADJUSTABLE_THRESHOLD_PX_PER_MS
+    );
+    const [lowerSeparatorPointerMinTriggerSpeed, setLowerSeparatorPointerMinTriggerSpeed] = useState(
+        DEFAULT_LOWER_SEPARATOR_POINTER_MIN_TRIGGER_SPEED_PX_PER_MS
+    );
+    const lowerSeparatorPointerTriggerSpeed = Math.max(
+        lowerSeparatorPointerSpeedAdjustableThreshold,
+        lowerSeparatorPointerMinTriggerSpeed
+    );
+    const pxToLeftColPercent = (px: number): number => {
+        const s = connectionPanelRef.current?.getSize();
+        if (s && s.asPercentage > 0 && s.inPixels > 0) {
+            const h = s.inPixels / (s.asPercentage / 100);
+            if (Number.isFinite(h) && h > 0) return Math.min(100, Math.max(0.1, (px / h) * 100));
+        }
+        return Math.min(100, Math.max(0.1, (px / 750) * 100));
+    };
+    const pxToRightColPercent = (px: number): number => {
+        const s = frameListPanelRef.current?.getSize();
+        if (s && s.asPercentage > 0 && s.inPixels > 0) {
+            const h = s.inPixels / (s.asPercentage / 100);
+            if (Number.isFinite(h) && h > 0) return Math.min(100, Math.max(0.1, (px / h) * 100));
+        }
+        return Math.min(100, Math.max(0.1, (px / 750) * 100));
+    };
+    const connectionPanelEffectiveMinPercent = pxToLeftColPercent(CONNECTION_COLLAPSED_HEIGHT_PX + PANEL_MIN_GAP_PX);
+    const connectionPanelEffectiveCollapsible = true;
+    const lowerSeparatorDebugEnabled =
+        typeof window !== "undefined"
+            ? (window.localStorage.getItem(LOWER_SEPARATOR_DEBUG_STORAGE_KEY) ?? "1") === "1"
+            : true;
+
+    const logLowerSeparatorDebug = (event: string, payload?: Record<string, unknown>) => {
+        if (!lowerSeparatorDebugEnabled) {
+            return;
+        }
+        const record = {
+            event,
+            payload: payload ?? {},
+        };
+        void wsDebugWriteLowerSeparatorLog(JSON.stringify(record)).catch(() => {
+            // Ignore logging failures; diagnostics should not affect runtime behavior.
+        });
+    };
+
+    useEffect(() => {
+        if (!lowerSeparatorDebugEnabled) {
+            return;
+        }
+
+        const initializeDebugLog = async () => {
+            try {
+                const path = await wsDebugLowerSeparatorLogPath();
+                await wsDebugClearLowerSeparatorLog();
+                await wsDebugWriteLowerSeparatorLog(
+                    JSON.stringify({
+                        event: "debug-session-start",
+                        payload: {
+                            path,
+                            triggerSpeed: lowerSeparatorPointerTriggerSpeed,
+                            adjustableThreshold: lowerSeparatorPointerSpeedAdjustableThreshold,
+                            minTriggerSpeed: lowerSeparatorPointerMinTriggerSpeed,
+                        },
+                    })
+                );
+            } catch {
+                // Ignore logging failures; diagnostics should not affect runtime behavior.
+            }
+        };
+
+        void initializeDebugLog();
+    }, [
+        lowerSeparatorDebugEnabled,
+        lowerSeparatorPointerTriggerSpeed,
+        lowerSeparatorPointerSpeedAdjustableThreshold,
+        lowerSeparatorPointerMinTriggerSpeed,
+    ]);
+
+    useEffect(() => {
+        if (!lowerSeparatorDragInProgress) {
+            setConnectionLowerSeparatorMinPercent(null);
+            setConnectionLowerSeparatorLockActive(false);
+        }
+    }, [lowerSeparatorDragInProgress]);
     const [autoPlayServerPCM, setAutoPlayServerPCM] = useState(true);
     const [serverPCMSampleRate, setServerPCMSampleRate] = useState(16000);
     const [serverPCMChannels, setServerPCMChannels] = useState(1);
@@ -234,6 +353,41 @@ function App() {
 
     const cloneMiniTranslationHeaderPreset = () =>
         miniTranslationHeaderPreset.map((rule) => ({ ...rule }));
+
+    const easeOutCubic = (t: number) => {
+        return 1 - Math.pow(1 - t, 3);
+    };
+
+    const getPanelCollapsedSizePercent = (
+        panelRef: React.RefObject<PanelImperativeHandle | null>,
+        collapsedPx: number,
+        fallbackPercent: number
+    ) => {
+        const current = panelRef.current?.getSize();
+        if (!current || current.asPercentage <= 0 || current.inPixels <= 0) {
+            return fallbackPercent;
+        }
+        const estimatedContainerPixels = current.inPixels / (current.asPercentage / 100);
+        if (!Number.isFinite(estimatedContainerPixels) || estimatedContainerPixels <= 0) {
+            return fallbackPercent;
+        }
+        const targetPercent = (collapsedPx / estimatedContainerPixels) * 100;
+        return Math.min(100, Math.max(1, targetPercent));
+    };
+
+    const getConnectionCollapsedSizePercent = () => getPanelCollapsedSizePercent(connectionPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX, 5);
+    const getSendCollapsedSizePercent = () => getPanelCollapsedSizePercent(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX, 5);
+    const getResponseCollapsedSizePercent = () => getPanelCollapsedSizePercent(responsePanelRef, CONNECTION_COLLAPSED_HEIGHT_PX, 5);
+    const getFrameListCollapsedSizePercent = () => getPanelCollapsedSizePercent(frameListPanelRef, FRAME_PANEL_COLLAPSED_HEIGHT_PX, 5);
+    const getFrameDetailCollapsedSizePercent = () => getPanelCollapsedSizePercent(frameDetailPanelRef, FRAME_PANEL_COLLAPSED_HEIGHT_PX, 5);
+
+    const isConnectionPhysicallyCollapsed = () => {
+        const size = connectionPanelRef.current?.getSize();
+        if (!size) {
+            return false;
+        }
+        return Boolean(connectionPanelRef.current?.isCollapsed()) || size.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX + 0.5;
+    };
 
     const normalizeLanguageTag = (raw: string) => {
         const trimmed = raw.trim();
@@ -654,8 +808,18 @@ function App() {
     }, []);
 
     const collapseConnectionPanel = () => {
+        logLowerSeparatorDebug("connection-collapse-start", {
+            connectionPanelCollapsed,
+            panelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
+            panelSize: connectionPanelRef.current?.getSize(),
+            collapseSource: collapseSourceRef.current,
+        });
         if (connectionPanelCollapsed) {
             return;
+        }
+        if (connectionCollapseAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(connectionCollapseAnimationFrameRef.current);
+            connectionCollapseAnimationFrameRef.current = null;
         }
         if (connectionExpandAnimationFrameRef.current !== null) {
             cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
@@ -668,41 +832,57 @@ function App() {
             lastExpandedConnectionSizeRef.current = currentSize;
         }
 
-        const startPixels = connectionPanelRef.current?.getSize().inPixels ?? CONNECTION_COLLAPSED_HEIGHT_PX;
-        const targetPixels = CONNECTION_COLLAPSED_HEIGHT_PX;
+        const startPercent = connectionPanelRef.current?.getSize().asPercentage ?? 25;
+        const collapsedPercent = getFrameListCollapsedSizePercent();
         const durationMs = PANEL_COLLAPSE_ANIMATION_MS;
 
-        if (startPixels <= targetPixels + 0.5) {
+        // Skip animation if already fully collapsed
+        if (startPercent <= collapsedPercent + 0.1) {
             collapseSourceRef.current = "button";
+            connectionPanelRef.current?.resize(`${collapsedPercent}%`);
             connectionPanelRef.current?.collapse();
-            setConnectionPanelCollapsed(true);
-            connectionExpandAnimatingRef.current = false;
+            setConnectionPanelCollapsed(isConnectionPhysicallyCollapsed());
+            connectionCollapseAnimatingRef.current = false;
             return;
         }
 
         collapseSourceRef.current = "button";
-        connectionExpandAnimatingRef.current = true;
+        connectionCollapseAnimatingRef.current = true;
 
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / durationMs);
-            const size = startPixels + (targetPixels - startPixels) * progress;
-            connectionPanelRef.current?.resize(`${size}px`);
+            const rawProgress = Math.min(1, (now - startTime) / durationMs);
+            const easedProgress = easeOutCubic(rawProgress);
+            const sizePercent = startPercent + (collapsedPercent - startPercent) * easedProgress;
+            connectionPanelRef.current?.resize(`${sizePercent}%`);
 
-            if (progress < 1) {
-                connectionExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
+            if (rawProgress < 1) {
+                connectionCollapseAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
 
+            connectionPanelRef.current?.resize(`${collapsedPercent}%`);
             connectionPanelRef.current?.collapse();
-            setConnectionPanelCollapsed(true);
-            connectionExpandAnimatingRef.current = false;
-            connectionExpandAnimationFrameRef.current = null;
+            const actuallyCollapsed = isConnectionPhysicallyCollapsed();
+            setConnectionPanelCollapsed(actuallyCollapsed);
+            connectionCollapseAnimatingRef.current = false;
+            connectionCollapseAnimationFrameRef.current = null;
+            logLowerSeparatorDebug("connection-collapse-end", {
+                actuallyCollapsed,
+                panelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
+                panelSize: connectionPanelRef.current?.getSize(),
+            });
         };
 
-        connectionExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
+        connectionCollapseAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
     };
 
     const expandConnectionPanel = () => {
+        logLowerSeparatorDebug("connection-expand-start", {
+            connectionPanelCollapsed,
+            panelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
+            panelSize: connectionPanelRef.current?.getSize(),
+            targetSize: lastExpandedConnectionSizeRef.current,
+        });
         const targetSize = lastExpandedConnectionSizeRef.current;
         const startSize = connectionPanelRef.current?.getSize().asPercentage ?? 0;
         const durationMs = PANEL_COLLAPSE_ANIMATION_MS;
@@ -714,15 +894,15 @@ function App() {
 
         collapseSourceRef.current = null;
         connectionExpandAnimatingRef.current = true;
-        connectionPanelRef.current?.expand();
         setConnectionPanelCollapsed(false);
 
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / durationMs);
-            const size = startSize + (targetSize - startSize) * progress;
+            const rawProgress = Math.min(1, (now - startTime) / durationMs);
+            const easedProgress = easeOutCubic(rawProgress);
+            const size = startSize + (targetSize - startSize) * easedProgress;
             connectionPanelRef.current?.resize(`${size}%`);
 
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 connectionExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
@@ -730,12 +910,28 @@ function App() {
             connectionPanelRef.current?.resize(`${targetSize}%`);
             connectionExpandAnimatingRef.current = false;
             connectionExpandAnimationFrameRef.current = null;
+            logLowerSeparatorDebug("connection-expand-end", {
+                panelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
+                panelSize: connectionPanelRef.current?.getSize(),
+            });
         };
 
         connectionExpandAnimationFrameRef.current = requestAnimationFrame((startNow) => animate(startNow, startNow));
     };
 
     const handleToggleConnectionPanel = () => {
+        flushSync(() => {
+            setLowerSeparatorDragInProgress(false);
+            setConnectionLowerSeparatorMinPercent(null);
+            setConnectionLowerSeparatorLockActive(false);
+        });
+        logLowerSeparatorDebug("connection-toggle-click", {
+            connectionPanelCollapsed,
+            panelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
+            panelSize: connectionPanelRef.current?.getSize(),
+            connectionPanelEffectiveMinPercent,
+            connectionPanelEffectiveCollapsible,
+        });
         if (connectionPanelCollapsed) {
             expandConnectionPanel();
             return;
@@ -756,34 +952,75 @@ function App() {
     };
 
     const handleConnectionPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
-        const isActuallyCollapsed = connectionPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
+        const isActuallyCollapsed = connectionPanelRef.current?.isCollapsed() || (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
+
+        const setResizeDebugBranch = (
+            branch: "animating-collapse" | "animating-expand" | "drag-cascade" | "drag-blocked" | "normal"
+        ) => {
+            if (!lowerSeparatorDebugEnabled) {
+                return;
+            }
+            if (
+                connectionResizeDebugLastBranchRef.current !== branch ||
+                connectionResizeDebugLastCollapsedRef.current !== isActuallyCollapsed
+            ) {
+                connectionResizeDebugLastBranchRef.current = branch;
+                connectionResizeDebugLastCollapsedRef.current = isActuallyCollapsed;
+                logLowerSeparatorDebug("connection-resize-branch", {
+                    branch,
+                    isActuallyCollapsed,
+                    panelSize,
+                    connectionPanelCollapsed,
+                    lowerSeparatorDragActive: lowerSeparatorDragActiveRef.current,
+                    lowerSeparatorAllowCascade: lowerSeparatorAllowConnectionCascadeRef.current,
+                    lowerSeparatorCascadeTriggered: lowerSeparatorCascadeTriggeredRef.current,
+                    connectionLowerSeparatorMinPercent,
+                });
+            }
+        };
+
+        // Ignore resize events during collapse animation
+        if (connectionCollapseAnimatingRef.current) {
+            setResizeDebugBranch("animating-collapse");
+            return;
+        }
 
         if (connectionExpandAnimatingRef.current) {
+            setResizeDebugBranch("animating-expand");
             setConnectionPanelCollapsed(false);
             return;
         }
 
-        if (lowerSeparatorDragActiveRef.current && !lowerSeparatorAllowConnectionCascadeRef.current) {
-            const lockedSize =
-                lowerSeparatorConnectionSizeAtStartRef.current ??
-                (connectionPanelCollapsed ? null : lastExpandedConnectionSizeRef.current);
-            if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
-                connectionPanelRef.current?.resize(`${lockedSize}%`);
+        // During lower separator drag with cascade allowed (threshold-triggered or Send already collapsed)
+        if (lowerSeparatorDragActiveRef.current && lowerSeparatorAllowConnectionCascadeRef.current) {
+            setResizeDebugBranch("drag-cascade");
+            if (lowerSeparatorCascadeTriggeredRef.current && !connectionPanelCollapsed) {
+                const restoreSize = connectionResizeStartSizeRef.current ?? lastExpandedConnectionSizeRef.current;
+                if (typeof restoreSize === "number" && Number.isFinite(restoreSize) && restoreSize > 1) {
+                    lastExpandedConnectionSizeRef.current = restoreSize;
+                }
+                collapseSourceRef.current = "drag";
             }
             setConnectionPanelCollapsed(false);
             return;
         }
 
+        // During lower separator drag with cascade blocked — lock height via temporary minSize.
+        if (lowerSeparatorDragActiveRef.current && !lowerSeparatorAllowConnectionCascadeRef.current) {
+            setResizeDebugBranch("drag-blocked");
+            setConnectionPanelCollapsed(false);
+            return;
+        }
+
+        setResizeDebugBranch("normal");
+
+        // Normal path (not during lower separator drag)
         if (isActuallyCollapsed) {
-            // 刚刚变为折叠：锁定恢复目标，不再被后续 onResize 覆盖
             if (connectionResizeDraggingRef.current && connectionResizeStartSizeRef.current !== null && collapseSourceRef.current !== "button") {
-                // 场景2: 拖拽导致折叠 → 用拖拽按下瞬间的高度
                 lastExpandedConnectionSizeRef.current = connectionResizeStartSizeRef.current;
                 collapseSourceRef.current = "drag";
             }
-            // 场景1（button）或已锁定：不做任何覆盖
         } else if (collapseSourceRef.current === null) {
-            // 未折叠且不在折叠恢复过程中：正常跟踪
             lastExpandedConnectionSizeRef.current = panelSize.asPercentage;
         }
 
@@ -804,11 +1041,15 @@ function App() {
             lastExpandedFrameListSizeRef.current = currentSize;
         }
 
-        const startPixels = frameListPanelRef.current?.getSize().inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const sizeObj = frameListPanelRef.current?.getSize();
+        const startPixels = sizeObj?.inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const startPercent = sizeObj?.asPercentage ?? 50;
         const targetPixels = FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const collapsedPercent = getFrameDetailCollapsedSizePercent();
 
         if (startPixels <= targetPixels + 0.5) {
             frameListCollapseSourceRef.current = "button";
+            frameListPanelRef.current?.resize(`${collapsedPercent}%`);
             frameListPanelRef.current?.collapse();
             setFrameListCollapsed(true);
             frameListExpandAnimatingRef.current = false;
@@ -819,15 +1060,17 @@ function App() {
         frameListExpandAnimatingRef.current = true;
 
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startPixels + (targetPixels - startPixels) * progress;
-            frameListPanelRef.current?.resize(`${size}px`);
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const sizePercent = startPercent + (collapsedPercent - startPercent) * easedProgress;
+            frameListPanelRef.current?.resize(`${sizePercent}%`);
 
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 frameListExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
 
+            frameListPanelRef.current?.resize(`${collapsedPercent}%`);
             frameListPanelRef.current?.collapse();
             setFrameListCollapsed(true);
             frameListExpandAnimatingRef.current = false;
@@ -852,11 +1095,12 @@ function App() {
         setFrameListCollapsed(false);
 
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startSize + (targetSize - startSize) * progress;
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const size = startSize + (targetSize - startSize) * easedProgress;
             frameListPanelRef.current?.resize(`${size}%`);
 
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 frameListExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
@@ -891,11 +1135,15 @@ function App() {
             lastExpandedFrameDetailSizeRef.current = currentSize;
         }
 
-        const startPixels = frameDetailPanelRef.current?.getSize().inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const sizeObj = frameDetailPanelRef.current?.getSize();
+        const startPixels = sizeObj?.inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const startPercent = sizeObj?.asPercentage ?? 50;
         const targetPixels = FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const collapsedPercent = getSendCollapsedSizePercent();
 
         if (startPixels <= targetPixels + 0.5) {
             frameDetailCollapseSourceRef.current = "button";
+            frameDetailPanelRef.current?.resize(`${collapsedPercent}%`);
             frameDetailPanelRef.current?.collapse();
             setFrameDetailCollapsed(true);
             frameDetailExpandAnimatingRef.current = false;
@@ -906,15 +1154,17 @@ function App() {
         frameDetailExpandAnimatingRef.current = true;
 
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startPixels + (targetPixels - startPixels) * progress;
-            frameDetailPanelRef.current?.resize(`${size}px`);
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const sizePercent = startPercent + (collapsedPercent - startPercent) * easedProgress;
+            frameDetailPanelRef.current?.resize(`${sizePercent}%`);
 
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 frameDetailExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
 
+            frameDetailPanelRef.current?.resize(`${collapsedPercent}%`);
             frameDetailPanelRef.current?.collapse();
             setFrameDetailCollapsed(true);
             frameDetailExpandAnimatingRef.current = false;
@@ -939,11 +1189,12 @@ function App() {
         setFrameDetailCollapsed(false);
 
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startSize + (targetSize - startSize) * progress;
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const size = startSize + (targetSize - startSize) * easedProgress;
             frameDetailPanelRef.current?.resize(`${size}%`);
 
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 frameDetailExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
@@ -979,7 +1230,7 @@ function App() {
     };
 
     const handleFrameListPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
-        const isActuallyCollapsed = frameListPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
+        const isActuallyCollapsed = frameListPanelRef.current?.isCollapsed() || (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
 
         if (frameListExpandAnimatingRef.current) {
             setFrameListCollapsed(false);
@@ -999,7 +1250,7 @@ function App() {
     };
 
     const handleFrameDetailPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
-        const isActuallyCollapsed = frameDetailPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
+        const isActuallyCollapsed = frameDetailPanelRef.current?.isCollapsed() || (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
 
         if (frameDetailExpandAnimatingRef.current) {
             setFrameDetailCollapsed(false);
@@ -1038,10 +1289,15 @@ function App() {
         if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
             lastExpandedSendSizeRef.current = currentSize;
         }
-        const startPixels = sendPanelRef.current?.getSize().inPixels ?? CONNECTION_COLLAPSED_HEIGHT_PX;
+        const sizeObj = sendPanelRef.current?.getSize();
+        const startPixels = sizeObj?.inPixels ?? CONNECTION_COLLAPSED_HEIGHT_PX;
+        const startPercent = sizeObj?.asPercentage ?? 35;
         const targetPixels = CONNECTION_COLLAPSED_HEIGHT_PX;
+        const collapsedPercent = getResponseCollapsedSizePercent();
+
         if (startPixels <= targetPixels + 0.5) {
             sendCollapseSourceRef.current = "button";
+            sendPanelRef.current?.resize(`${collapsedPercent}%`);
             sendPanelRef.current?.collapse();
             setSendPanelCollapsed(true);
             sendExpandAnimatingRef.current = false;
@@ -1050,13 +1306,15 @@ function App() {
         sendCollapseSourceRef.current = "button";
         sendExpandAnimatingRef.current = true;
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startPixels + (targetPixels - startPixels) * progress;
-            sendPanelRef.current?.resize(`${size}px`);
-            if (progress < 1) {
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const sizePercent = startPercent + (collapsedPercent - startPercent) * easedProgress;
+            sendPanelRef.current?.resize(`${sizePercent}%`);
+            if (rawProgress < 1) {
                 sendExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
+            sendPanelRef.current?.resize(`${collapsedPercent}%`);
             sendPanelRef.current?.collapse();
             setSendPanelCollapsed(true);
             sendExpandAnimatingRef.current = false;
@@ -1077,10 +1335,11 @@ function App() {
         sendPanelRef.current?.expand();
         setSendPanelCollapsed(false);
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startSize + (targetSize - startSize) * progress;
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const size = startSize + (targetSize - startSize) * easedProgress;
             sendPanelRef.current?.resize(`${size}%`);
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 sendExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
@@ -1100,7 +1359,7 @@ function App() {
     };
 
     const handleSendPanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
-        const isActuallyCollapsed = sendPanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
+        const isActuallyCollapsed = sendPanelRef.current?.isCollapsed() || (panelSize.inPixels <= CONNECTION_COLLAPSED_HEIGHT_PX);
         if (sendExpandAnimatingRef.current) {
             setSendPanelCollapsed(false);
             return;
@@ -1113,11 +1372,27 @@ function App() {
             isActuallyCollapsed
         ) {
             lowerSeparatorLockAfterSendCollapsedRef.current = true;
+            lowerSeparatorHardLockedRef.current = false;
             const lockedResponse = responsePanelRef.current?.getSize().asPercentage;
             if (typeof lockedResponse === "number" && Number.isFinite(lockedResponse)) {
                 lowerSeparatorLockedResponseSizeRef.current = lockedResponse;
             }
-            lowerSeparatorAllowConnectionCascadeRef.current = false;
+            lowerSeparatorAllowConnectionCascadeRef.current = true;
+
+            if (!connectionPanelCollapsed && !connectionCollapseAnimatingRef.current) {
+                const currentConnectionSize = connectionPanelRef.current?.getSize().asPercentage;
+                if (typeof currentConnectionSize === "number" && Number.isFinite(currentConnectionSize)) {
+                    lastExpandedConnectionSizeRef.current = currentConnectionSize;
+                }
+                setConnectionLowerSeparatorMinPercent(null);
+                setConnectionLowerSeparatorLockActive(false);
+                lowerSeparatorCascadeTriggeredRef.current = true;
+                collapseSourceRef.current = "drag";
+                const collapsedPercent = getConnectionCollapsedSizePercent();
+                connectionPanelRef.current?.resize(`${collapsedPercent}%`);
+                connectionPanelRef.current?.collapse();
+                setConnectionPanelCollapsed(true);
+            }
         }
 
         if (isActuallyCollapsed) {
@@ -1128,10 +1403,31 @@ function App() {
         } else if (sendCollapseSourceRef.current === null) {
             lastExpandedSendSizeRef.current = panelSize.asPercentage;
         }
+
+        if (
+            lowerSeparatorDragActiveRef.current &&
+            !lowerSeparatorSendCollapsedAtStartRef.current &&
+            lowerSeparatorLockAfterSendCollapsedRef.current &&
+            !isActuallyCollapsed
+        ) {
+            lowerSeparatorLockAfterSendCollapsedRef.current = false;
+            lowerSeparatorHardLockedRef.current = false;
+            lowerSeparatorLockedResponseSizeRef.current = null;
+        }
+
         setSendPanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
     };
 
     const handleResponseResizeStart = () => {
+        logLowerSeparatorDebug("response-resize-start", {
+            sendPanelCollapsed,
+            connectionPanelCollapsed,
+            connectionSize: connectionPanelRef.current?.getSize(),
+            responseSize: responsePanelRef.current?.getSize(),
+            triggerSpeed: lowerSeparatorPointerTriggerSpeed,
+            adjustableThreshold: lowerSeparatorPointerSpeedAdjustableThreshold,
+            minTriggerSpeed: lowerSeparatorPointerMinTriggerSpeed,
+        });
         responseResizeDraggingRef.current = true;
         if (!responsePanelCollapsed) {
             const currentSize = responsePanelRef.current?.getSize().asPercentage;
@@ -1141,14 +1437,157 @@ function App() {
         }
 
         lowerSeparatorDragActiveRef.current = true;
+        setLowerSeparatorDragInProgress(true);
         lowerSeparatorSendCollapsedAtStartRef.current = sendPanelCollapsed;
-        lowerSeparatorAllowConnectionCascadeRef.current = sendPanelCollapsed;
+        lowerSeparatorAllowConnectionCascadeRef.current = false;
+        lowerSeparatorCascadeTriggeredRef.current = false;
         lowerSeparatorLockAfterSendCollapsedRef.current = false;
+        lowerSeparatorHardLockedRef.current = false;
         lowerSeparatorLockedResponseSizeRef.current = null;
+
+        // Initialize Connection resize start size for potential cascade collapse
+        if (!connectionPanelCollapsed) {
+            const currentConnectionSize = connectionPanelRef.current?.getSize().asPercentage;
+            if (typeof currentConnectionSize === "number" && Number.isFinite(currentConnectionSize)) {
+                connectionResizeStartSizeRef.current = currentConnectionSize;
+            }
+        }
 
         const connectionSize = connectionPanelRef.current?.getSize().asPercentage;
         lowerSeparatorConnectionSizeAtStartRef.current =
             typeof connectionSize === "number" && Number.isFinite(connectionSize) ? connectionSize : null;
+        const connectionPixels = connectionPanelRef.current?.getSize().inPixels;
+        lowerSeparatorConnectionPixelsAtStartRef.current =
+            typeof connectionPixels === "number" && Number.isFinite(connectionPixels) ? connectionPixels : null;
+        lowerSeparatorPendingConnectionExpandRef.current = false;
+        if (!connectionPanelCollapsed && typeof connectionPixels === "number" && Number.isFinite(connectionPixels)) {
+            const connectionPercent = connectionPanelRef.current?.getSize().asPercentage;
+            if (typeof connectionPercent === "number" && Number.isFinite(connectionPercent) && connectionPercent > 0) {
+                setConnectionLowerSeparatorMinPercent(connectionPercent);
+            }
+            setConnectionLowerSeparatorLockActive(true);
+        } else {
+            setConnectionLowerSeparatorMinPercent(null);
+            setConnectionLowerSeparatorLockActive(false);
+        }
+
+        // Pointer-based speed detection: track Y position to detect fast upward drag
+        lowerSeparatorLastPointerYRef.current = null;
+        lowerSeparatorLastPointerTimeRef.current = null;
+        lowerSeparatorSpeedEmaRef.current = null;
+        lowerSeparatorUpwardTravelRef.current = 0;
+        lowerSeparatorUpwardFastStreakRef.current = 0;
+        lowerSeparatorMoveSampleCountRef.current = 0;
+
+        // Remove stale handler if any
+        if (lowerSeparatorPointerMoveHandlerRef.current) {
+            window.removeEventListener("pointermove", lowerSeparatorPointerMoveHandlerRef.current);
+        }
+
+        const onPointerMove = (e: PointerEvent) => {
+            const lastY = lowerSeparatorLastPointerYRef.current;
+            const lastTime = lowerSeparatorLastPointerTimeRef.current;
+            const now = performance.now();
+
+            if (typeof lastY === "number" && typeof lastTime === "number") {
+                const timeDelta = now - lastTime;
+                if (timeDelta >= LOWER_SEPARATOR_POINTER_MIN_SAMPLE_TIME_MS) {
+                    const deltaY = e.clientY - lastY;
+                    const speed = Math.abs(deltaY) / timeDelta; // px per ms
+                    const prevEma = lowerSeparatorSpeedEmaRef.current;
+                    const speedEma =
+                        prevEma === null
+                            ? speed
+                            : prevEma * (1 - LOWER_SEPARATOR_POINTER_SPEED_EMA_ALPHA) + speed * LOWER_SEPARATOR_POINTER_SPEED_EMA_ALPHA;
+                    lowerSeparatorSpeedEmaRef.current = speedEma;
+                    const canEvaluateCascadeSpeed =
+                        lowerSeparatorDragActiveRef.current &&
+                        (lowerSeparatorSendCollapsedAtStartRef.current || lowerSeparatorLockAfterSendCollapsedRef.current);
+                    const isUpwardSpeedQualifiedSample =
+                        deltaY <= -LOWER_SEPARATOR_POINTER_MIN_UPWARD_DELTA_PX &&
+                        speedEma >= lowerSeparatorPointerTriggerSpeed;
+
+                    lowerSeparatorMoveSampleCountRef.current += 1;
+                    if (lowerSeparatorDebugEnabled && lowerSeparatorMoveSampleCountRef.current % 8 === 0) {
+                        logLowerSeparatorDebug("pointer-move-sample", {
+                            deltaY,
+                            timeDelta,
+                            speed,
+                            speedEma,
+                            triggerSpeed: lowerSeparatorPointerTriggerSpeed,
+                            upwardTravel: lowerSeparatorUpwardTravelRef.current,
+                            upwardFastStreak: lowerSeparatorUpwardFastStreakRef.current,
+                            canEvaluateCascadeSpeed,
+                            cascadeTriggered: lowerSeparatorCascadeTriggeredRef.current,
+                            allowCascade: lowerSeparatorAllowConnectionCascadeRef.current,
+                            connectionPanelSize: connectionPanelRef.current?.getSize(),
+                            sendPanelSize: sendPanelRef.current?.getSize(),
+                            responsePanelSize: responsePanelRef.current?.getSize(),
+                        });
+                    }
+
+                    if (canEvaluateCascadeSpeed) {
+                        if (isUpwardSpeedQualifiedSample) {
+                            lowerSeparatorUpwardTravelRef.current += -deltaY;
+                            lowerSeparatorUpwardFastStreakRef.current += 1;
+                        } else if (deltaY > 0) {
+                            lowerSeparatorUpwardTravelRef.current = 0;
+                            lowerSeparatorUpwardFastStreakRef.current = 0;
+                        } else {
+                            lowerSeparatorUpwardFastStreakRef.current = 0;
+                        }
+                    } else {
+                        lowerSeparatorUpwardTravelRef.current = 0;
+                        lowerSeparatorUpwardFastStreakRef.current = 0;
+                    }
+
+                    if (
+                        canEvaluateCascadeSpeed &&
+                        !lowerSeparatorCascadeTriggeredRef.current &&
+                        isUpwardSpeedQualifiedSample &&
+                        lowerSeparatorUpwardTravelRef.current >= LOWER_SEPARATOR_POINTER_MIN_TRIGGER_TRAVEL_PX &&
+                        lowerSeparatorUpwardFastStreakRef.current >= LOWER_SEPARATOR_POINTER_MIN_TRIGGER_STREAK
+                    ) {
+                        // Threshold reached while dragging up: enable cascade and collapse Connection UI
+                        logLowerSeparatorDebug("cascade-triggered", {
+                            deltaY,
+                            timeDelta,
+                            speed,
+                            speedEma,
+                            triggerSpeed: lowerSeparatorPointerTriggerSpeed,
+                            upwardTravel: lowerSeparatorUpwardTravelRef.current,
+                            upwardFastStreak: lowerSeparatorUpwardFastStreakRef.current,
+                            connectionSize: connectionPanelRef.current?.getSize(),
+                            sendSize: sendPanelRef.current?.getSize(),
+                            responseSize: responsePanelRef.current?.getSize(),
+                        });
+                        lowerSeparatorAllowConnectionCascadeRef.current = true;
+                        lowerSeparatorCascadeTriggeredRef.current = true;
+                        lowerSeparatorPendingConnectionExpandRef.current = false;
+                        setConnectionLowerSeparatorMinPercent(null);
+                        setConnectionLowerSeparatorLockActive(false);
+
+                        if (!connectionPanelCollapsed && !connectionCollapseAnimatingRef.current) {
+                            const currentSize = connectionPanelRef.current?.getSize().asPercentage;
+                            if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+                                lastExpandedConnectionSizeRef.current = currentSize;
+                            }
+                            collapseSourceRef.current = "drag";
+                            const collapsedPercent = getConnectionCollapsedSizePercent();
+                            connectionPanelRef.current?.resize(`${collapsedPercent}%`);
+                            connectionPanelRef.current?.collapse();
+                            setConnectionPanelCollapsed(true);
+                        }
+                    }
+                }
+            }
+
+            lowerSeparatorLastPointerYRef.current = e.clientY;
+            lowerSeparatorLastPointerTimeRef.current = now;
+        };
+
+        lowerSeparatorPointerMoveHandlerRef.current = onPointerMove;
+        window.addEventListener("pointermove", onPointerMove);
     };
 
     const collapseResponsePanel = () => {
@@ -1161,10 +1600,15 @@ function App() {
         if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
             lastExpandedResponseSizeRef.current = currentSize;
         }
-        const startPixels = responsePanelRef.current?.getSize().inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const sizeObj = responsePanelRef.current?.getSize();
+        const startPixels = sizeObj?.inPixels ?? FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const startPercent = sizeObj?.asPercentage ?? 40;
         const targetPixels = FRAME_PANEL_COLLAPSED_HEIGHT_PX;
+        const collapsedPercent = getConnectionCollapsedSizePercent();
+
         if (startPixels <= targetPixels + 0.5) {
             responseCollapseSourceRef.current = "button";
+            responsePanelRef.current?.resize(`${collapsedPercent}%`);
             responsePanelRef.current?.collapse();
             setResponsePanelCollapsed(true);
             responseExpandAnimatingRef.current = false;
@@ -1173,13 +1617,15 @@ function App() {
         responseCollapseSourceRef.current = "button";
         responseExpandAnimatingRef.current = true;
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startPixels + (targetPixels - startPixels) * progress;
-            responsePanelRef.current?.resize(`${size}px`);
-            if (progress < 1) {
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const sizePercent = startPercent + (collapsedPercent - startPercent) * easedProgress;
+            responsePanelRef.current?.resize(`${sizePercent}%`);
+            if (rawProgress < 1) {
                 responseExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
+            responsePanelRef.current?.resize(`${collapsedPercent}%`);
             responsePanelRef.current?.collapse();
             setResponsePanelCollapsed(true);
             responseExpandAnimatingRef.current = false;
@@ -1200,10 +1646,11 @@ function App() {
         responsePanelRef.current?.expand();
         setResponsePanelCollapsed(false);
         const animate = (now: number, startTime: number) => {
-            const progress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
-            const size = startSize + (targetSize - startSize) * progress;
+            const rawProgress = Math.min(1, (now - startTime) / PANEL_COLLAPSE_ANIMATION_MS);
+            const easedProgress = easeOutCubic(rawProgress);
+            const size = startSize + (targetSize - startSize) * easedProgress;
             responsePanelRef.current?.resize(`${size}%`);
-            if (progress < 1) {
+            if (rawProgress < 1) {
                 responseExpandAnimationFrameRef.current = requestAnimationFrame((nextNow) => animate(nextNow, startTime));
                 return;
             }
@@ -1223,7 +1670,7 @@ function App() {
     };
 
     const handleResponsePanelResize = (panelSize: { asPercentage: number; inPixels: number }) => {
-        const isActuallyCollapsed = responsePanelRef.current?.isCollapsed() ?? (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
+        const isActuallyCollapsed = responsePanelRef.current?.isCollapsed() || (panelSize.inPixels <= FRAME_PANEL_COLLAPSED_HEIGHT_PX);
         if (responseExpandAnimatingRef.current) {
             setResponsePanelCollapsed(false);
             return;
@@ -1236,9 +1683,22 @@ function App() {
         ) {
             const lockedSize = lowerSeparatorLockedResponseSizeRef.current;
             if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
-                responsePanelRef.current?.resize(`${lockedSize}%`);
+                const higherThanLock = panelSize.asPercentage > lockedSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
+                const farBeyondSoftZone = panelSize.asPercentage > lockedSize + PANEL_DRAG_SOFT_ZONE_PERCENT;
+
+                if (farBeyondSoftZone || (lowerSeparatorHardLockedRef.current && higherThanLock)) {
+                    lowerSeparatorHardLockedRef.current = true;
+                    responsePanelRef.current?.resize(`${lockedSize}%`);
+                    return;
+                }
+
+                if (panelSize.asPercentage < lockedSize - PANEL_DRAG_CLAMP_EPSILON_PERCENT) {
+                    lowerSeparatorHardLockedRef.current = false;
+                    return;
+                }
+
+                return;
             }
-            return;
         }
 
         if (isActuallyCollapsed) {
@@ -1254,6 +1714,31 @@ function App() {
 
     useEffect(() => {
         const handlePointerUp = () => {
+            const wasLowerSeparatorDragActive = lowerSeparatorDragActiveRef.current;
+            const connectionPixelsAtPointerUp = connectionPanelRef.current?.getSize().inPixels;
+            const isConnectionPhysicallyCollapsedAtPointerUp =
+                connectionPanelRef.current?.isCollapsed() ||
+                (typeof connectionPixelsAtPointerUp === "number" && connectionPixelsAtPointerUp <= CONNECTION_COLLAPSED_HEIGHT_PX + 0.5);
+            const shouldFinalizeConnectionCollapse =
+                wasLowerSeparatorDragActive &&
+                lowerSeparatorCascadeTriggeredRef.current &&
+                isConnectionPhysicallyCollapsedAtPointerUp;
+            logLowerSeparatorDebug("pointer-up-summary", {
+                shouldFinalizeConnectionCollapse,
+                isConnectionPhysicallyCollapsedAtPointerUp,
+                connectionPixelsAtPointerUp,
+                connectionPanelCollapsed,
+                connectionPanelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
+                connectionPanelSize: connectionPanelRef.current?.getSize(),
+                sendPanelSize: sendPanelRef.current?.getSize(),
+                responsePanelSize: responsePanelRef.current?.getSize(),
+                lowerSeparatorCascadeTriggered: lowerSeparatorCascadeTriggeredRef.current,
+                lowerSeparatorAllowCascade: lowerSeparatorAllowConnectionCascadeRef.current,
+                lowerSeparatorPendingExpand: lowerSeparatorPendingConnectionExpandRef.current,
+                lowerSeparatorConnectionSizeAtStart: lowerSeparatorConnectionSizeAtStartRef.current,
+                lowerSeparatorConnectionPixelsAtStart: lowerSeparatorConnectionPixelsAtStartRef.current,
+                connectionLowerSeparatorMinPercent,
+            });
             connectionResizeDraggingRef.current = false;
             connectionResizeStartSizeRef.current = null;
             responseResizeDraggingRef.current = false;
@@ -1266,18 +1751,53 @@ function App() {
             lowerSeparatorDragActiveRef.current = false;
             lowerSeparatorSendCollapsedAtStartRef.current = false;
             lowerSeparatorAllowConnectionCascadeRef.current = false;
+            lowerSeparatorCascadeTriggeredRef.current = false;
             lowerSeparatorLockAfterSendCollapsedRef.current = false;
+            lowerSeparatorHardLockedRef.current = false;
             lowerSeparatorLockedResponseSizeRef.current = null;
             lowerSeparatorConnectionSizeAtStartRef.current = null;
+            lowerSeparatorConnectionPixelsAtStartRef.current = null;
+            lowerSeparatorPendingConnectionExpandRef.current = false;
+            lowerSeparatorLastPointerYRef.current = null;
+            lowerSeparatorLastPointerTimeRef.current = null;
+            lowerSeparatorSpeedEmaRef.current = null;
+            lowerSeparatorUpwardTravelRef.current = 0;
+            lowerSeparatorUpwardFastStreakRef.current = 0;
+            setConnectionLowerSeparatorMinPercent(null);
+            setConnectionLowerSeparatorLockActive(false);
+            setLowerSeparatorDragInProgress(false);
+            // Remove pointermove handler
+            if (lowerSeparatorPointerMoveHandlerRef.current) {
+                window.removeEventListener("pointermove", lowerSeparatorPointerMoveHandlerRef.current);
+                lowerSeparatorPointerMoveHandlerRef.current = null;
+            }
+            if (wasLowerSeparatorDragActive) {
+                if (shouldFinalizeConnectionCollapse) {
+                    setConnectionPanelCollapsed(true);
+                    collapseSourceRef.current = "drag";
+                } else {
+                    setConnectionPanelCollapsed(isConnectionPhysicallyCollapsedAtPointerUp);
+                    collapseSourceRef.current = null;
+                }
+            }
         };
         window.addEventListener("pointerup", handlePointerUp);
-        return () => window.removeEventListener("pointerup", handlePointerUp);
+        window.addEventListener("pointercancel", handlePointerUp);
+        window.addEventListener("blur", handlePointerUp);
+        return () => {
+            window.removeEventListener("pointerup", handlePointerUp);
+            window.removeEventListener("pointercancel", handlePointerUp);
+            window.removeEventListener("blur", handlePointerUp);
+        };
     }, []);
 
     useEffect(() => {
         return () => {
             if (connectionExpandAnimationFrameRef.current !== null) {
                 cancelAnimationFrame(connectionExpandAnimationFrameRef.current);
+            }
+            if (connectionCollapseAnimationFrameRef.current !== null) {
+                cancelAnimationFrame(connectionCollapseAnimationFrameRef.current);
             }
             if (frameListExpandAnimationFrameRef.current !== null) {
                 cancelAnimationFrame(frameListExpandAnimationFrameRef.current);
@@ -1606,6 +2126,22 @@ function App() {
                 const normalized = Math.max(0, Math.min(2, rawServerPCMAdaptiveRateStrength));
                 setServerPCMAdaptiveRateStrength(normalized);
             }
+
+            const rawLowerSeparatorPointerSpeedAdjustableThreshold = Number(
+                window.localStorage.getItem("wavecat.lowerSeparatorPointerSpeedAdjustableThreshold")
+            );
+            if (Number.isFinite(rawLowerSeparatorPointerSpeedAdjustableThreshold)) {
+                const normalized = Math.max(0.2, Math.min(4, rawLowerSeparatorPointerSpeedAdjustableThreshold));
+                setLowerSeparatorPointerSpeedAdjustableThreshold(normalized);
+            }
+
+            const rawLowerSeparatorPointerMinTriggerSpeed = Number(
+                window.localStorage.getItem("wavecat.lowerSeparatorPointerMinTriggerSpeed")
+            );
+            if (Number.isFinite(rawLowerSeparatorPointerMinTriggerSpeed)) {
+                const normalized = Math.max(0.1, Math.min(2.5, rawLowerSeparatorPointerMinTriggerSpeed));
+                setLowerSeparatorPointerMinTriggerSpeed(normalized);
+            }
         } catch {
             // ignore localStorage parse errors
         }
@@ -1721,6 +2257,17 @@ function App() {
     useEffect(() => {
         window.localStorage.setItem("wavecat.serverPCMAdaptiveRateStrength", String(serverPCMAdaptiveRateStrength));
     }, [serverPCMAdaptiveRateStrength]);
+
+    useEffect(() => {
+        window.localStorage.setItem(
+            "wavecat.lowerSeparatorPointerSpeedAdjustableThreshold",
+            String(lowerSeparatorPointerSpeedAdjustableThreshold)
+        );
+    }, [lowerSeparatorPointerSpeedAdjustableThreshold]);
+
+    useEffect(() => {
+        window.localStorage.setItem("wavecat.lowerSeparatorPointerMinTriggerSpeed", String(lowerSeparatorPointerMinTriggerSpeed));
+    }, [lowerSeparatorPointerMinTriggerSpeed]);
 
     useEffect(() => {
         const draft: LastDraftConfig = {
@@ -2787,9 +3334,9 @@ function App() {
             <Panel
                 panelRef={connectionPanelRef}
                 defaultSize={25}
-                minSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
-                collapsible
-                collapsedSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
+                minSize={`${connectionPanelEffectiveMinPercent}%`}
+                collapsible={connectionPanelEffectiveCollapsible}
+                collapsedSize={`${pxToLeftColPercent(CONNECTION_COLLAPSED_HEIGHT_PX)}%`}
                 onResize={handleConnectionPanelResize}
             >
                 <ConnectionPanel
@@ -2820,9 +3367,9 @@ function App() {
             <Panel
                 panelRef={sendPanelRef}
                 defaultSize={35}
-                minSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
+                minSize={`${pxToLeftColPercent(CONNECTION_COLLAPSED_HEIGHT_PX + PANEL_MIN_GAP_PX)}%`}
                 collapsible
-                collapsedSize={`${CONNECTION_COLLAPSED_HEIGHT_PX}px`}
+                collapsedSize={`${pxToLeftColPercent(CONNECTION_COLLAPSED_HEIGHT_PX)}%`}
                 onResize={handleSendPanelResize}
             >
                 <SendPanel
@@ -2933,9 +3480,9 @@ function App() {
             <Panel
                 panelRef={responsePanelRef}
                 defaultSize={40}
-                minSize="42px"
+                minSize={`${pxToLeftColPercent(CONNECTION_COLLAPSED_HEIGHT_PX + PANEL_MIN_GAP_PX)}%`}
                 collapsible
-                collapsedSize="42px"
+                collapsedSize={`${pxToLeftColPercent(CONNECTION_COLLAPSED_HEIGHT_PX)}%`}
                 onResize={handleResponsePanelResize}
             >
                 <ResponsePanel
@@ -2957,9 +3504,9 @@ function App() {
             <Panel
                 panelRef={frameListPanelRef}
                 defaultSize={50}
-                minSize="42px"
+                minSize={`${pxToRightColPercent(FRAME_PANEL_COLLAPSED_HEIGHT_PX + PANEL_MIN_GAP_PX)}%`}
                 collapsible
-                collapsedSize="42px"
+                collapsedSize={`${pxToRightColPercent(FRAME_PANEL_COLLAPSED_HEIGHT_PX)}%`}
                 onResize={handleFrameListPanelResize}
             >
                 <FrameList
@@ -2988,9 +3535,9 @@ function App() {
             <Panel
                 panelRef={frameDetailPanelRef}
                 defaultSize={50}
-                minSize="42px"
+                minSize={`${pxToRightColPercent(FRAME_PANEL_COLLAPSED_HEIGHT_PX + PANEL_MIN_GAP_PX)}%`}
                 collapsible
-                collapsedSize="42px"
+                collapsedSize={`${pxToRightColPercent(FRAME_PANEL_COLLAPSED_HEIGHT_PX)}%`}
                 onResize={handleFrameDetailPanelResize}
             >
                 <FrameDetail
@@ -3286,6 +3833,64 @@ function App() {
                                     }}
                                 />
                             </label>
+                            <label className="field">
+                                <span>
+                                    Drag Collapse Adjustable Threshold: {lowerSeparatorPointerSpeedAdjustableThreshold.toFixed(2)} px/ms
+                                </span>
+                                <input
+                                    type="range"
+                                    min={0.2}
+                                    max={4}
+                                    step={0.1}
+                                    value={lowerSeparatorPointerSpeedAdjustableThreshold}
+                                    onChange={(event) => {
+                                        const next = Number(event.target.value);
+                                        setLowerSeparatorPointerSpeedAdjustableThreshold(
+                                            Number.isFinite(next)
+                                                ? Math.max(0.2, Math.min(4, next))
+                                                : DEFAULT_LOWER_SEPARATOR_POINTER_SPEED_ADJUSTABLE_THRESHOLD_PX_PER_MS
+                                        );
+                                    }}
+                                />
+                            </label>
+                            <label className="field">
+                                <span>
+                                    Drag Collapse Min Trigger Speed: {lowerSeparatorPointerMinTriggerSpeed.toFixed(2)} px/ms
+                                </span>
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={2.5}
+                                    step={0.1}
+                                    value={lowerSeparatorPointerMinTriggerSpeed}
+                                    onChange={(event) => {
+                                        const next = Number(event.target.value);
+                                        setLowerSeparatorPointerMinTriggerSpeed(
+                                            Number.isFinite(next)
+                                                ? Math.max(0.1, Math.min(2.5, next))
+                                                : DEFAULT_LOWER_SEPARATOR_POINTER_MIN_TRIGGER_SPEED_PX_PER_MS
+                                        );
+                                    }}
+                                />
+                            </label>
+                            <div className="field">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setLowerSeparatorPointerSpeedAdjustableThreshold(
+                                            DEFAULT_LOWER_SEPARATOR_POINTER_SPEED_ADJUSTABLE_THRESHOLD_PX_PER_MS
+                                        );
+                                        setLowerSeparatorPointerMinTriggerSpeed(
+                                            DEFAULT_LOWER_SEPARATOR_POINTER_MIN_TRIGGER_SPEED_PX_PER_MS
+                                        );
+                                    }}
+                                >
+                                    Reset Drag Threshold Defaults
+                                </button>
+                            </div>
+                            <div className="audio-probe-row">
+                                active trigger speed: {lowerSeparatorPointerTriggerSpeed.toFixed(2)} px/ms (max of adjustable and min)
+                            </div>
                             <div className="audio-probe-block">
                                 <div className="audio-probe-title">Audio Probe</div>
                                 <div className="audio-probe-row">scanned: {audioProbe.scanned}</div>

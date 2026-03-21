@@ -29,6 +29,9 @@ type AppBridge = {
   WsPickPCMFile: () => Promise<FilePickResult>;
   WsInspectAudioFile: (filePath: string) => Promise<AudioFileInfo>;
   WsSavePCMBytes: (base64Data: string) => Promise<SendResult>;
+  DebugLowerSeparatorLogPath: () => Promise<string>;
+  DebugClearLowerSeparatorLog: () => Promise<SendResult>;
+  DebugWriteLowerSeparatorLog: (entry: string) => Promise<SendResult>;
 };
 
 function appBridge(): AppBridge {
@@ -113,4 +116,16 @@ export async function wsInspectAudioFile(filePath: string): Promise<AudioFileInf
 
 export async function wsSavePCMBytes(base64Data: string): Promise<SendResult> {
   return appBridge().WsSavePCMBytes(base64Data);
+}
+
+export async function wsDebugLowerSeparatorLogPath(): Promise<string> {
+  return appBridge().DebugLowerSeparatorLogPath();
+}
+
+export async function wsDebugClearLowerSeparatorLog(): Promise<SendResult> {
+  return appBridge().DebugClearLowerSeparatorLog();
+}
+
+export async function wsDebugWriteLowerSeparatorLog(entry: string): Promise<SendResult> {
+  return appBridge().DebugWriteLowerSeparatorLog(entry);
 }

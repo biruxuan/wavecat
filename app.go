@@ -26,6 +26,7 @@ type App struct {
 	wsClient   *ws.Client
 	audio      *audio.Streamer
 	stateMu    sync.Mutex
+	debugLogMu sync.Mutex
 	windowW    int
 	windowH    int
 	windowX    int
@@ -196,6 +197,60 @@ func windowStatePath() string {
 		return ""
 	}
 	return filepath.Join(configDir, "wavecat", "window.json")
+}
+
+func lowerSeparatorDebugLogPath() string {
+	wd, err := os.Getwd()
+	if err == nil && strings.TrimSpace(wd) != "" {
+		return filepath.Join(wd, "continue_backup", "lower-separator-debug.log")
+	}
+	return filepath.Join(os.TempDir(), "wavecat-lower-separator-debug.log")
+}
+
+func (a *App) DebugLowerSeparatorLogPath() string {
+	return lowerSeparatorDebugLogPath()
+}
+
+func (a *App) DebugClearLowerSeparatorLog() model.SendResult {
+	a.debugLogMu.Lock()
+	defer a.debugLogMu.Unlock()
+
+	path := lowerSeparatorDebugLogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+	return model.SendResult{Success: true, Message: path}
+}
+
+func (a *App) DebugWriteLowerSeparatorLog(entry string) model.SendResult {
+	a.debugLogMu.Lock()
+	defer a.debugLogMu.Unlock()
+
+	path := lowerSeparatorDebugLogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+	defer file.Close()
+
+	line := strings.TrimSpace(entry)
+	if line == "" {
+		return model.SendResult{Success: true, Message: path}
+	}
+
+	timestamped := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339Nano), line)
+	if _, err := file.WriteString(timestamped); err != nil {
+		return model.SendResult{Success: false, Message: err.Error()}
+	}
+
+	return model.SendResult{Success: true, Message: path}
 }
 
 // Greet returns a greeting for the given name
