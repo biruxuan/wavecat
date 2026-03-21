@@ -708,6 +708,12 @@ button:disabled {
   padding: 8px 10px 10px;
 }
 
+.response-body-wrap.drag-active .response-body-inner {
+  overflow: hidden;
+  will-change: transform;
+  transform: translateZ(0);
+}
+
 .send-panel-wizard {
   overflow: hidden;
   padding: 0;

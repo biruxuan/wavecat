@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { Frame, SessionSummary } from "../types";
 
 const WAVEFORM_MODE_STORAGE_KEY = "wavecat.responseWaveformMode";
@@ -16,10 +16,11 @@ type Props = {
   playbackPositionSec?: number;
   playbackTotalDurationSec?: number;
   collapsed?: boolean;
+  dragActive?: boolean;
   onToggleCollapsed?: () => void;
 };
 
-export function ResponsePanel({
+function ResponsePanelInner({
   frame,
   sessionSummary,
   liveText,
@@ -27,6 +28,7 @@ export function ResponsePanel({
   playbackPositionSec = 0,
   playbackTotalDurationSec = 0,
   collapsed = false,
+  dragActive = false,
   onToggleCollapsed,
 }: Props) {
   const [showWaveform, setShowWaveform] = useState(true);
@@ -39,6 +41,28 @@ export function ResponsePanel({
     }
   });
   const [manualScrollBar, setManualScrollBar] = useState(0);
+  const stableWaveformRef = useRef<number[]>(playbackWaveform);
+  const stablePlaybackPositionRef = useRef(playbackPositionSec);
+  const stablePlaybackDurationRef = useRef(playbackTotalDurationSec);
+  const stableFrameRef = useRef(frame);
+  const stableSessionSummaryRef = useRef(sessionSummary);
+  const stableLiveTextRef = useRef(liveText);
+
+  if (!dragActive) {
+    stableWaveformRef.current = playbackWaveform;
+    stablePlaybackPositionRef.current = playbackPositionSec;
+    stablePlaybackDurationRef.current = playbackTotalDurationSec;
+    stableFrameRef.current = frame;
+    stableSessionSummaryRef.current = sessionSummary;
+    stableLiveTextRef.current = liveText;
+  }
+
+  const effectivePlaybackWaveform = dragActive ? stableWaveformRef.current : playbackWaveform;
+  const effectivePlaybackPositionSec = dragActive ? stablePlaybackPositionRef.current : playbackPositionSec;
+  const effectivePlaybackDurationSec = dragActive ? stablePlaybackDurationRef.current : playbackTotalDurationSec;
+  const effectiveFrame = dragActive ? stableFrameRef.current : frame;
+  const effectiveSessionSummary = dragActive ? stableSessionSummaryRef.current : sessionSummary;
+  const effectiveLiveText = dragActive ? stableLiveTextRef.current : liveText;
 
   useEffect(() => {
     try {
@@ -48,18 +72,18 @@ export function ResponsePanel({
     }
   }, [waveformMode]);
 
-  const totalBars = playbackWaveform.length;
+  const totalBars = effectivePlaybackWaveform.length;
   const needsSlider = totalBars > BARS_PER_WINDOW;
   // Active playback: audio is enqueued AND position hasn't reached the end
-  const isPlaying = playbackTotalDurationSec > 0 && playbackPositionSec < playbackTotalDurationSec - 0.01;
+  const isPlaying = effectivePlaybackDurationSec > 0 && effectivePlaybackPositionSec < effectivePlaybackDurationSec - 0.01;
   const playedBars = useMemo(() => {
     if (totalBars <= 0) return 0;
-    if (playbackTotalDurationSec > 0) {
-      const ratio = Math.max(0, Math.min(1, playbackPositionSec / playbackTotalDurationSec));
+    if (effectivePlaybackDurationSec > 0) {
+      const ratio = Math.max(0, Math.min(1, effectivePlaybackPositionSec / effectivePlaybackDurationSec));
       return ratio * totalBars;
     }
-    return playbackPositionSec / SLOT_SEC;
-  }, [playbackPositionSec, playbackTotalDurationSec, totalBars]);
+    return effectivePlaybackPositionSec / SLOT_SEC;
+  }, [effectivePlaybackPositionSec, effectivePlaybackDurationSec, totalBars]);
   const barsInView = Math.min(BARS_PER_WINDOW, totalBars);
 
   // Compute window start and cursor position
@@ -96,8 +120,8 @@ export function ResponsePanel({
   const viewOffsetBars = Math.max(0, windowStart - viewStartInt);
   const visibleBars = useMemo(() => {
     // +1 keeps right edge filled when we shift by fractional offset
-    return playbackWaveform.slice(viewStartInt, viewStartInt + barsInView + 1);
-  }, [playbackWaveform, viewStartInt, barsInView]);
+    return effectivePlaybackWaveform.slice(viewStartInt, viewStartInt + barsInView + 1);
+  }, [effectivePlaybackWaveform, viewStartInt, barsInView]);
 
   // When playback ends, sync slider to last playback position
   const wasPlayingRef = useRef(false);
@@ -271,9 +295,9 @@ export function ResponsePanel({
           </button>
         )}
       </div>
-      <div className={`response-body-wrap${collapsed ? " collapsed" : ""}`}>
+      <div className={`response-body-wrap${collapsed ? " collapsed" : ""}${dragActive ? " drag-active" : ""}`}>
         <div className="response-body-inner">
-          {!frame && !sessionSummary && !liveText ? <div className="placeholder">No inbound response yet.</div> : null}
+          {!effectiveFrame && !effectiveSessionSummary && !effectiveLiveText ? <div className="placeholder">No inbound response yet.</div> : null}
 
       <div className="live-text-block">
         <div className="waveform-header">
@@ -322,79 +346,79 @@ export function ResponsePanel({
         )}
       </div>
 
-      {liveText ? (
+      {effectiveLiveText ? (
         <div className="live-text-block">
           <div className="live-text-label">Assistant Response</div>
-          <pre className="live-text">{liveText}</pre>
+          <pre className="live-text">{effectiveLiveText}</pre>
         </div>
       ) : null}
 
-      {sessionSummary ? (
+      {effectiveSessionSummary ? (
         <>
           <h4>Session Summary</h4>
           <div className="detail-meta">
-            <span>Profile: {sessionSummary.profileType}</span>
-            <span>Status: {sessionSummary.status || "idle"}</span>
-            {sessionSummary.error ? <span>Error: {sessionSummary.error}</span> : null}
-            {sessionSummary.startedFrame ? <span>Started Frame: {sessionSummary.startedFrame.id}</span> : null}
-            {sessionSummary.finalFrame ? <span>Final Frame: {sessionSummary.finalFrame.id}</span> : null}
-            {sessionSummary.sessionFinishedFrame ? <span>Session Finished Frame: {sessionSummary.sessionFinishedFrame.id}</span> : null}
-            {typeof sessionSummary.extractedAudioChunks === "number" ? <span>Audio Chunks: {sessionSummary.extractedAudioChunks}</span> : null}
-            {typeof sessionSummary.extractedAudioBytes === "number" ? <span>Audio Bytes: {sessionSummary.extractedAudioBytes}</span> : null}
+            <span>Profile: {effectiveSessionSummary.profileType}</span>
+            <span>Status: {effectiveSessionSummary.status || "idle"}</span>
+            {effectiveSessionSummary.error ? <span>Error: {effectiveSessionSummary.error}</span> : null}
+            {effectiveSessionSummary.startedFrame ? <span>Started Frame: {effectiveSessionSummary.startedFrame.id}</span> : null}
+            {effectiveSessionSummary.finalFrame ? <span>Final Frame: {effectiveSessionSummary.finalFrame.id}</span> : null}
+            {effectiveSessionSummary.sessionFinishedFrame ? <span>Session Finished Frame: {effectiveSessionSummary.sessionFinishedFrame.id}</span> : null}
+            {typeof effectiveSessionSummary.extractedAudioChunks === "number" ? <span>Audio Chunks: {effectiveSessionSummary.extractedAudioChunks}</span> : null}
+            {typeof effectiveSessionSummary.extractedAudioBytes === "number" ? <span>Audio Bytes: {effectiveSessionSummary.extractedAudioBytes}</span> : null}
           </div>
 
-          {sessionSummary.extractedText ? (
+          {effectiveSessionSummary.extractedText ? (
             <>
               <h4>Extracted Text</h4>
-              <pre>{sessionSummary.extractedText}</pre>
+              <pre>{effectiveSessionSummary.extractedText}</pre>
             </>
           ) : null}
 
-          {sessionSummary.finalFrame?.text ? (
+          {effectiveSessionSummary.finalFrame?.text ? (
             <>
               <h4>Final Event / JSON</h4>
-              <pre>{sessionSummary.finalFrame.text}</pre>
+              <pre>{effectiveSessionSummary.finalFrame.text}</pre>
             </>
           ) : null}
 
-          {sessionSummary.sessionFinishedFrame?.text ? (
+          {effectiveSessionSummary.sessionFinishedFrame?.text ? (
             <>
               <h4>Session Finished / JSON</h4>
-              <pre>{sessionSummary.sessionFinishedFrame.text}</pre>
+              <pre>{effectiveSessionSummary.sessionFinishedFrame.text}</pre>
             </>
           ) : null}
         </>
       ) : null}
 
-      {frame ? (
+      {effectiveFrame ? (
         <>
           <div className="detail-meta">
-            <span>ID: {frame.id}</span>
-            <span>Type: {frame.type}</span>
-            <span>Size: {frame.size}</span>
-            <span>Time: {new Date(frame.timestamp).toLocaleTimeString()}</span>
+            <span>ID: {effectiveFrame.id}</span>
+            <span>Type: {effectiveFrame.type}</span>
+            <span>Size: {effectiveFrame.size}</span>
+            <span>Time: {new Date(effectiveFrame.timestamp).toLocaleTimeString()}</span>
           </div>
           <h4>Summary</h4>
-          <pre>{frame.summary}</pre>
+          <pre>{effectiveFrame.summary}</pre>
 
-          {frame.text ? (
+          {effectiveFrame.text ? (
             <>
               <h4>Text / JSON</h4>
-              <pre>{frame.text}</pre>
+              <pre>{effectiveFrame.text}</pre>
             </>
           ) : null}
 
-          {frame.hex ? (
+          {effectiveFrame.hex ? (
             <>
               <h4>HEX</h4>
-              <pre>{frame.hex}</pre>
+              <pre>{effectiveFrame.hex}</pre>
             </>
           ) : null}
 
-          {frame.ascii ? (
+          {effectiveFrame.ascii ? (
             <>
               <h4>ASCII</h4>
-              <pre>{frame.ascii}</pre>
+              <pre>{effectiveFrame.ascii}</pre>
             </>
           ) : null}
         </>
@@ -404,3 +428,23 @@ export function ResponsePanel({
     </section>
   );
 }
+
+export const ResponsePanel = memo(ResponsePanelInner, (prevProps, nextProps) => {
+  if (prevProps.dragActive && nextProps.dragActive) {
+    return (
+      prevProps.collapsed === nextProps.collapsed &&
+      prevProps.dragActive === nextProps.dragActive
+    );
+  }
+
+  return (
+    prevProps.frame === nextProps.frame &&
+    prevProps.sessionSummary === nextProps.sessionSummary &&
+    prevProps.liveText === nextProps.liveText &&
+    prevProps.playbackWaveform === nextProps.playbackWaveform &&
+    prevProps.playbackPositionSec === nextProps.playbackPositionSec &&
+    prevProps.playbackTotalDurationSec === nextProps.playbackTotalDurationSec &&
+    prevProps.collapsed === nextProps.collapsed &&
+    prevProps.dragActive === nextProps.dragActive
+  );
+});
