@@ -17,3 +17,12 @@ to this in your browser, and you can call your Go code from devtools.
 ## Building
 
 To build a redistributable, production mode package, use `wails build`.
+
+
+## 未解决的问题
+### 拖拽Response分区时，send/connection 两个分区会鬼畜
+#### 正确逻辑
+
+1. 当send处于折叠状态，拖动response分割栏时，send保持折叠状态，response分区正常调整大小，实时挤压connection大小直到其折叠。
+2. 当send处于展开状态，拖动response分割栏时,先折叠send,当send折叠后需要加快速度或者松开鼠标(复用逻辑1)才能继续拖动
+3. 若一直不松手，持续向上拖动至send和connection都折叠，此时向下拖动则：如果send先折叠，则response先展开；如果其中任意一个在拖动前就已经处于折叠，则折叠谁就展开谁。
