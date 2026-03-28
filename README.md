@@ -558,95 +558,95 @@ const handleLowerSeparatorPointerUp = () => {
 ---
 
 ### B. 引入新状态机骨架
-- [ ] 在 `frontend/src/App.tsx` 中新增 `LowerDragPhase`
-  - [ ] `idle`
-  - [ ] `dragging_free`
-  - [ ] `send_locked`
-  - [ ] `cascade_active`
-  - [ ] `cascade_releasing`
-- [ ] 新增 `LowerDragState`
-- [ ] 新增 `lowerDragStateRef`
-- [ ] 新增 `transitionLowerDragPhase(nextPhase, reason)`
-- [ ] 新增 `resetLowerDragState()`
-- [ ] 新增 `isLowerCascadePhase()` 辅助判断
+- [x] 在 `frontend/src/App.tsx` 中新增 `LowerDragPhase`
+  - [x] `idle`
+  - [x] `dragging_free`
+  - [x] `send_locked`
+  - [x] `cascade_active`
+  - [x] `cascade_releasing`
+- [x] 新增 `LowerDragState`
+- [x] 新增 `lowerDragStateRef`
+- [x] 新增 `transitionLowerDragPhase(nextPhase, reason)`
+- [x] 新增 `resetLowerDragState()`
+- [x] 新增 `isLowerCascadePhase()` 辅助判断
 
 #### 验收标准
-- [ ] 编译通过
-- [ ] 不修改现有拖拽行为前提下，新 phase 骨架已经可用
-- [ ] Console 中能看到 phase transition 日志
+- [x] 编译通过
+- [x] 不修改现有拖拽行为前提下，新 phase 骨架已经可用
+- [x] Console 中能看到 phase transition 日志
 
 ---
 
 ### C. 改造拖拽开始 / 结束
 #### 拖拽开始
-- [ ] 将 lower separator pointer down / drag start 统一接入 `beginLowerSeparatorDrag()`
-- [ ] 在 drag start 时记录快照：
-  - [ ] `sendCollapsedAtStart`
-  - [ ] `connectionCollapsedAtStart`
-  - [ ] `connectionSizeAtStart`
-  - [ ] `connectionPixelsAtStart`
-  - [ ] `lockedResponseSize = null`
-- [ ] drag start 后 phase 进入 `dragging_free`
+- [x] 将 lower separator pointer down / drag start 统一接入 `beginLowerSeparatorDrag()`
+- [x] 在 drag start 时记录快照：
+  - [x] `sendCollapsedAtStart`
+  - [x] `connectionCollapsedAtStart`
+  - [x] `connectionSizeAtStart`
+  - [x] `connectionPixelsAtStart`
+  - [x] `lockedResponseSize = null`
+- [x] drag start 后 phase 进入 `dragging_free`
 
 #### 拖拽结束
-- [ ] pointer up 统一接入 `resetLowerDragState()`
-- [ ] toggle / collapse button / 异常中断路径也尽量复用统一 reset
+- [x] pointer up 统一接入 `resetLowerDragState()`
+- [x] toggle / collapse button / 异常中断路径也尽量复用统一 reset
 
 #### 验收标准
-- [ ] 拖拽开始时 phase 必定为 `dragging_free`
-- [ ] 拖拽结束后 phase 必定回到 `idle`
+- [x] 拖拽开始时 phase 必定为 `dragging_free`
+- [x] 拖拽结束后 phase 必定回到 `idle`
 - [ ] pointer up 后不存在残留 lock / pending / cascade 状态
 
 ---
 
 ### D. 改造 send 折叠后的锁定逻辑
-- [ ] 找到当前“send 被拖到折叠点”的逻辑分支
-- [ ] 将其改造成：`dragging_free -> send_locked`
-- [ ] 在进入 `send_locked` 时记录 `lockedResponseSize`
-- [ ] 迁移期内允许同步写旧 ref，但新逻辑判断应优先依赖 phase
+- [x] 找到当前“send 被拖到折叠点”的逻辑分支
+- [x] 将其改造成：`dragging_free -> send_locked`
+- [x] 在进入 `send_locked` 时记录 `lockedResponseSize`
+- [x] 迁移期内允许同步写旧 ref，但新逻辑判断应优先依赖 phase
 
 #### 验收标准
-- [ ] 当 send 初始展开、上拖至折叠时，phase 从 `dragging_free` 变为 `send_locked`
-- [ ] 进入 `send_locked` 后 response 恢复点被正确记录
+- [x] 当 send 初始展开、上拖至折叠时，phase 从 `dragging_free` 变为 `send_locked`
+- [x] 进入 `send_locked` 后 response 恢复点被正确记录
 - [ ] 没有因为 phase 改造导致 send 提前或重复折叠
 
 ---
 
 ### E. 改造 cascade 触发逻辑
-- [ ] 保留现有速度/位移阈值计算逻辑
-- [ ] 将“继续上拖触发 connection cascade”改造成：`send_locked -> cascade_active`
-- [ ] 后续 connection 可继续被压缩/折叠的判断，优先看 phase，而不是 `allowConnectionCascadeRef`
+- [x] 保留现有速度/位移阈值计算逻辑
+- [x] 将“继续上拖触发 connection cascade”改造成：`send_locked -> cascade_active`
+- [x] 后续 connection 可继续被压缩/折叠的判断，优先看 phase，而不是 `allowConnectionCascadeRef`
 
 #### 验收标准
-- [ ] send 已折叠后，继续明显上拖可触发 `cascade_active`
+- [x] send 已折叠后，继续明显上拖可触发 `cascade_active`
 - [ ] `cascade_active` 期间 connection 可继续响应级联压缩
 - [ ] 没有出现 send 未进入锁定态却直接进入 cascade 的情况
 
 ---
 
 ### F. 改造向下回拖释放逻辑
-- [ ] 将“明确向下回拖”改造成：`cascade_active -> cascade_releasing`
-- [ ] 在 `cascade_releasing` 中，只负责恢复 response 到 restore point
-- [ ] 达到 restore point 后，切换：`cascade_releasing -> dragging_free`
-- [ ] **不要**在这个阶段立即自动 `expand()` send / connection
+- [x] 将“明确向下回拖”改造成：`cascade_active -> cascade_releasing`
+- [x] 在 `cascade_releasing` 中，只负责恢复 response 到 restore point
+- [x] 达到 restore point 后，切换：`cascade_releasing -> dragging_free`
+- [x] **不要**在这个阶段立即自动 `expand()` send / connection
 
 #### 验收标准
 - [ ] connection/send 都被压缩后，向下拖时 response 会先恢复
-- [ ] 达到恢复点后，phase 回到 `dragging_free`
-- [ ] 不会在恢复临界点发生 panel 跳变
-- [ ] 不会因为自动 expand 造成鬼畜或闪动
+- [x] 达到恢复点后，phase 回到 `dragging_free`
+- [x] 不会在恢复临界点发生 panel 跳变
+- [x] 不会因为自动 expand 造成鬼畜或闪动
 
 ---
 
 ### G. 将主要分支判断改为 phase 驱动
-- [ ] 搜索 lower separator 相关条件分支
+- [x] 搜索 lower separator 相关条件分支
 - [ ] 逐步将判断从：
-  - [ ] `lowerSeparatorAllowConnectionCascadeRef.current`
-  - [ ] `lowerSeparatorCascadeTriggeredRef.current`
-  - [ ] `lowerSeparatorLockAfterSendCollapsedRef.current`
+  - [x] `lowerSeparatorAllowConnectionCascadeRef.current`
+  - [x] `lowerSeparatorCascadeTriggeredRef.current`
+  - [x] `lowerSeparatorLockAfterSendCollapsedRef.current`
   改为：
-  - [ ] `lowerDragStateRef.current.phase === ...`
-- [ ] 保留旧 ref 仅做迁移兼容或 debug，不再作为主判断依据
+  - [x] `lowerDragStateRef.current.phase === ...`
+- [x] 保留旧 ref 仅做迁移兼容或 debug，不再作为主判断依据
 
 #### 验收标准
 - [ ] 主要分支已经以 phase 为真相源
@@ -656,15 +656,15 @@ const handleLowerSeparatorPointerUp = () => {
 ---
 
 ### H. 删除危险的自动展开逻辑
-- [ ] 删除/停用 `pendingConnectionExpand` 语义
-- [ ] 删除达到 restore point 后自动 `expand()` send 的逻辑
-- [ ] 删除达到 restore point 后自动 `expand()` connection 的逻辑
-- [ ] 保持“释放级联后回到自由拖拽，由用户继续拖动自然展开”
+- [x] 删除/停用 `pendingConnectionExpand` 语义
+- [x] 删除达到 restore point 后自动 `expand()` send 的逻辑
+- [x] 删除达到 restore point 后自动 `expand()` connection 的逻辑
+- [x] 保持“释放级联后回到自由拖拽，由用户继续拖动自然展开”
 
 #### 验收标准
-- [ ] 不存在恢复临界点自动展开多个 panel 的行为
-- [ ] panel 展开主要由用户持续拖动自然产生
-- [ ] 交互更稳定，不出现“刚到恢复点就跳一下”
+- [x] 不存在恢复临界点自动展开多个 panel 的行为
+- [x] panel 展开主要由用户持续拖动自然产生
+- [x] 交互更稳定，不出现“刚到恢复点就跳一下”
 
 ---
 
@@ -672,8 +672,8 @@ const handleLowerSeparatorPointerUp = () => {
 在 phase 逻辑稳定后，再分批删除旧 ref：
 
 #### 第一批
-- [ ] `lowerSeparatorPendingConnectionExpandRef`
-- [ ] 与其绑定的展开逻辑
+- [x] `lowerSeparatorPendingConnectionExpandRef`
+- [x] 与其绑定的展开逻辑
 
 #### 第二批
 - [ ] `lowerSeparatorAllowConnectionCascadeRef`
@@ -1018,13 +1018,13 @@ const beginLowerSeparatorDrag = () => {
 ### 第一批完成定义（DoD）
 只有满足以下条件，才认为第一批完成：
 
-- [ ] `LowerDragPhase` / `LowerDragState` / `lowerDragStateRef` 已落地
-- [ ] `transitionLowerDragPhase()` 已落地
-- [ ] `resetLowerDragState()` 已落地
-- [ ] drag start 已接入 `dragging_free`
-- [ ] drag end 已接入统一 reset
-- [ ] Console 可观察一轮完整的 `idle -> dragging_free -> idle`
-- [ ] 编译通过
+- [x] `LowerDragPhase` / `LowerDragState` / `lowerDragStateRef` 已落地
+- [x] `transitionLowerDragPhase()` 已落地
+- [x] `resetLowerDragState()` 已落地
+- [x] drag start 已接入 `dragging_free`
+- [x] drag end 已接入统一 reset
+- [x] Console 可观察一轮完整的 `idle -> dragging_free -> idle`
+- [x] 编译通过
 - [ ] 现有交互没有明显行为退化
 
 ---
@@ -1037,3 +1037,114 @@ const beginLowerSeparatorDrag = () => {
 3. `cascade_active -> cascade_releasing`
 4. `cascade_releasing -> dragging_free`
 5. 将主分支判断逐步从旧 ref 切到 phase
+
+---
+
+## Lower Separator 最短手测清单（当前阶段建议先测这 4 个）
+
+> 目标：不追求一次性覆盖所有 Case 1~7，而是先用最小手测成本，验证这轮 phase 重构是否已经稳定、是否还存在最危险的“鬼畜跳变/自动展开/残留状态”问题。
+
+### 手测前准备
+- [ ] 启动应用
+- [ ] 打开 DevTools Console
+- [ ] 确保能看到：
+  - [ ] `[lower-drag-start]`
+  - [ ] `[lower-drag-phase]`
+  - [ ] `[lower-drag-reset]`
+- [ ] 手测时重点观察：
+  - [ ] panel 是否突然自动 expand
+  - [ ] 是否出现拖拽到临界点时跳变
+  - [ ] pointer up 后下一轮拖拽是否干净
+
+---
+
+### Case A：send 初始展开，connection 初始展开
+#### 操作
+- [ ] 保持 send 展开
+- [ ] 保持 connection 展开
+- [ ] 向上拖动 response separator
+
+#### 预期
+- [ ] 先看到 phase：`idle -> dragging_free`
+- [ ] send 先进入折叠
+- [ ] 再看到 phase：`dragging_free -> send_locked`
+- [ ] 若继续明显上拖，再看到 phase：`send_locked -> cascade_active`
+- [ ] connection 开始被继续压缩/折叠
+
+#### 重点判定
+- [ ] send 不会还没折叠就直接 cascade connection
+- [ ] send 折叠时不会出现重复抖动
+- [ ] 没有明显“跳一下又弹回去”的现象
+
+---
+
+### Case B：send 和 connection 都被上拖压缩后，再向下回拖
+#### 操作
+- [ ] 先执行 Case A，直到进入 cascade
+- [ ] 然后保持不松手，明确向下拖动
+
+#### 预期
+- [ ] 先看到 phase：`cascade_active -> cascade_releasing`
+- [ ] response 先恢复
+- [ ] 到 restore point 时看到 phase：`cascade_releasing -> dragging_free`
+- [ ] **不会**在这一刻自动 expand send / connection
+- [ ] 若继续向下拖，再由用户拖动自然展开
+
+#### 重点判定
+- [ ] 没有 restore point 临界点自动弹开 panel
+- [ ] 没有“刚恢复到点位就鬼畜跳变”
+- [ ] response 恢复优先级正确
+
+---
+
+### Case C：send 初始折叠，connection 初始展开
+#### 操作
+- [ ] 先手动让 send 处于折叠
+- [ ] 保持 connection 展开
+- [ ] 再向上拖动 response separator
+
+#### 预期
+- [ ] phase：`idle -> dragging_free`
+- [ ] send 保持折叠，不应再经历一次 send lock 过程
+- [ ] response 正常调整
+- [ ] 继续上拖时，可进入 cascade 并影响 connection
+
+#### 重点判定
+- [ ] 不会错误再次触发 “send 折叠锁定”
+- [ ] 不会因为 send 初始已折叠而导致 phase 乱跳
+- [ ] 不会出现错误自动展开 send
+
+---
+
+### Case D：拖拽中松手，再立即开始下一轮拖拽
+#### 操作
+- [ ] 做任意一轮 lower drag
+- [ ] 在 `dragging_free` / `send_locked` / `cascade_active` 任一阶段松手
+- [ ] 然后立刻再次开始新一轮拖拽
+
+#### 预期
+- [ ] pointer up 时看到 `[lower-drag-reset]`
+- [ ] phase 回到 `idle`
+- [ ] 下一轮重新从 `idle -> dragging_free` 开始
+- [ ] 不携带上一轮的 locked/cascade 残留状态
+
+#### 重点判定
+- [ ] 不会出现“明明松手了还卡在 cascade/lock”
+- [ ] 不会出现下一轮拖拽直接从中间 phase 开始
+- [ ] 不会出现一次拖拽结束后 UI 仍被锁住
+
+---
+
+### 当前阶段通过标准
+如果下面 4 条都满足，可以认为这轮重构已经达到“可继续收尾优化”的状态：
+
+- [ ] Case A 通过
+- [ ] Case B 通过
+- [ ] Case C 通过
+- [ ] Case D 通过
+
+若 4 条全部通过，则建议下一步再做：
+- [ ] 清退 `lowerSeparatorAllowConnectionCascadeRef`
+- [ ] 清退 `lowerSeparatorCascadeTriggeredRef`
+- [ ] 清退 `lowerSeparatorLockAfterSendCollapsedRef`
+- [ ] 整理 `frontend/src/App.tsx` 中 lower separator 相关代码格式

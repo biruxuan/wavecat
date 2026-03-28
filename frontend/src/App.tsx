@@ -2,6 +2,25 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Group, Panel, Separator, type PanelImperativeHandle } from "react-resizable-panels";
 import "./App.css";
+import {
+    beginLowerSeparatorDrag as engineBeginDrag,
+    createIdleLeftLowerDragContext,
+    createIdleLowerDragState,
+    finalizeLowerSeparatorDrag as engineFinalizeDrag,
+    isLowerCascadePhase,
+    maybeEnterCascadeActivePhase as engineMaybeEnterCascade,
+    maybeEnterCascadeReleasingPhase as engineMaybeEnterReleasing,
+    maybeEnterSendLockedPhase as engineMaybeEnterSendLocked,
+    maybeReleaseCascadeToFreeDrag as engineMaybeRelease,
+    resetLowerDragState as engineResetDrag,
+    transitionLowerDragPhase as engineTransition,
+} from "./features/panel-orchestration/engine";
+import { createLeftLanePanelController } from "./features/panel-orchestration/panelController";
+import {
+    planLeftLowerSeparatorDownwardDrag,
+    planLeftLowerSeparatorUpwardDrag,
+} from "./features/panel-orchestration/leftLane";
+import type { LeftLowerDragContext, LowerDragState } from "./features/panel-orchestration/types";
 import { ConnectionPanel } from "./components/ConnectionPanel";
 import { FrameDetail } from "./components/FrameDetail";
 import { FrameList } from "./components/FrameList";
@@ -199,6 +218,9 @@ function App() {
     const lowerSeparatorUpwardTravelRef = useRef(0);
     const lowerSeparatorUpwardFastStreakRef = useRef(0);
     const lowerSeparatorPointerMoveHandlerRef = useRef<((e: PointerEvent) => void) | null>(null);
+    // Phase-based state machine refs (new orchestration layer)
+    const lowerDragStateRef = useRef<LowerDragState>(createIdleLowerDragState());
+    const leftLowerDragContextRef = useRef<LeftLowerDragContext>(createIdleLeftLowerDragContext());
     const [lowerSeparatorDragInProgress, setLowerSeparatorDragInProgress] = useState(false);
     const lowerSeparatorMoveSampleCountRef = useRef(0);
     const connectionResizeDebugLastBranchRef = useRef<"animating-collapse" | "animating-expand" | "drag-cascade" | "drag-blocked" | "normal" | null>(null);
@@ -419,6 +441,175 @@ function App() {
     const isConnectionPhysicallyCollapsed = () => {
         return isPanelVisuallyCollapsed(connectionPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX);
     };
+
+    // --- Panel Orchestration: sync compat refs from new state machine ---
+    const syncLowerDragCompatRefsFromState = (state: LowerDragState, context: LeftLowerDragContext) => {
+        lowerSeparatorDragActiveRef.current = context.active;
+        lowerSeparatorSendCollapsedAtStartRef.current = state.sendCollapsedAtStart;
+        lowerSeparatorConnectionCollapsedAtStartRef.current = state.connectionCollapsedAtStart;
+        lowerSeparatorLockedResponseSizeRef.current = state.lockedResponseSize;
+        lowerSeparatorCascadeTriggeredRef.current = isLowerCascadePhase(state.phase);
+        lowerSeparatorAllowConnectionCascadeRef.current =
+            isLowerCascadePhase(state.phase) || state.sendCollapsedAtStart || state.phase === "send_locked";
+        lowerSeparatorLockAfterSendCollapsedRef.current = state.phase === "send_locked";
+        lowerSeparatorHardLockedRef.current = isLowerCascadePhase(state.phase);
+        lowerSeparatorConnectionSizeAtStartRef.current = state.connectionSizeAtStart;
+        lowerSeparatorConnectionPixelsAtStartRef.current = state.connectionPixelsAtStart;
+    };
+
+    // --- Panel Orchestration: engine wrapper functions ---
+    const applyLowerDragPhaseTransition = (nextPhase: LowerDragState["phase"], reason: string) => {
+        const result = engineTransition({
+            lowerDragState: lowerDragStateRef.current,
+            leftLowerDragContext: leftLowerDragContextRef.current,
+            nextPhase,
+            reason,
+            onPhaseTransition: ({ prevPhase, nextPhase: np, reason: r }) => {
+                logLowerSeparatorDebug("[lower-drag-phase]", { prevPhase, nextPhase: np, reason: r });
+            },
+        });
+        lowerDragStateRef.current = result.lowerDragState;
+        leftLowerDragContextRef.current = result.leftLowerDragContext;
+        syncLowerDragCompatRefsFromState(result.lowerDragState, result.leftLowerDragContext);
+        return result;
+    };
+
+    const applyBeginLowerSeparatorDrag = (args: {
+        startPointerY: number | null;
+        sendCollapsedAtStart: boolean;
+        connectionCollapsedAtStart: boolean;
+        connectionPercentAtStart: number | null;
+        connectionPixelsAtStart: number | null;
+    }) => {
+        const result = engineBeginDrag(args);
+        lowerDragStateRef.current = result.lowerDragState;
+        leftLowerDragContextRef.current = result.leftLowerDragContext;
+        syncLowerDragCompatRefsFromState(result.lowerDragState, result.leftLowerDragContext);
+        logLowerSeparatorDebug("[lower-drag-start]", {
+            phase: result.lowerDragState.phase,
+            sendCollapsedAtStart: result.lowerDragState.sendCollapsedAtStart,
+            connectionCollapsedAtStart: result.lowerDragState.connectionCollapsedAtStart,
+        });
+    };
+
+    const applyMaybeEnterSendLocked = (lockedResponseSize: number | null) => {
+        const isActuallyCollapsed = isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX);
+        const result = engineMaybeEnterSendLocked({
+            lowerDragState: lowerDragStateRef.current,
+            leftLowerDragContext: leftLowerDragContextRef.current,
+            isActuallyCollapsed,
+            lockedResponseSize,
+        });
+        if (result.changed) {
+            lowerDragStateRef.current = result.lowerDragState;
+            leftLowerDragContextRef.current = result.leftLowerDragContext;
+            syncLowerDragCompatRefsFromState(result.lowerDragState, result.leftLowerDragContext);
+            logLowerSeparatorDebug("[lower-drag-phase]", { event: "send-locked", lockedResponseSize });
+        }
+        return result;
+    };
+
+    const applyMaybeEnterCascadeActive = (shouldTriggerCascade: boolean) => {
+        const result = engineMaybeEnterCascade({
+            lowerDragState: lowerDragStateRef.current,
+            leftLowerDragContext: leftLowerDragContextRef.current,
+            shouldTriggerCascade,
+        });
+        if (result.changed) {
+            lowerDragStateRef.current = result.lowerDragState;
+            leftLowerDragContextRef.current = result.leftLowerDragContext;
+            syncLowerDragCompatRefsFromState(result.lowerDragState, result.leftLowerDragContext);
+            logLowerSeparatorDebug("[lower-drag-phase]", { event: "cascade-active" });
+        }
+        return result;
+    };
+
+    const applyMaybeEnterCascadeReleasing = (deltaY: number) => {
+        const result = engineMaybeEnterReleasing({
+            lowerDragState: lowerDragStateRef.current,
+            leftLowerDragContext: leftLowerDragContextRef.current,
+            deltaY,
+            minDownwardReleaseDeltaPx: LOWER_SEPARATOR_POINTER_MIN_DOWNWARD_RELEASE_DELTA_PX,
+        });
+        if (result.changed) {
+            lowerDragStateRef.current = result.lowerDragState;
+            leftLowerDragContextRef.current = result.leftLowerDragContext;
+            syncLowerDragCompatRefsFromState(result.lowerDragState, result.leftLowerDragContext);
+            logLowerSeparatorDebug("[lower-drag-phase]", { event: "cascade-releasing" });
+        }
+        return result;
+    };
+
+    const applyMaybeReleaseCascade = (currentResponsePercent: number) => {
+        const result = engineMaybeRelease({
+            lowerDragState: lowerDragStateRef.current,
+            leftLowerDragContext: leftLowerDragContextRef.current,
+            currentResponsePercent,
+            clampEpsilonPercent: PANEL_DRAG_CLAMP_EPSILON_PERCENT,
+        });
+        if (result.changed) {
+            lowerDragStateRef.current = result.lowerDragState;
+            leftLowerDragContextRef.current = result.leftLowerDragContext;
+            syncLowerDragCompatRefsFromState(result.lowerDragState, result.leftLowerDragContext);
+            logLowerSeparatorDebug("[lower-drag-phase]", { event: "cascade-released", releasedWithoutLock: result.releasedWithoutLock });
+        }
+        return result;
+    };
+
+    const applyFinalizeLowerSeparatorDrag = () => {
+        const wasLowerSeparatorDragActive = lowerDragStateRef.current.phase !== "idle";
+        const connectionPixelsAtPointerUp = connectionPanelRef.current?.getSize().inPixels;
+        const isConnectionPhysicallyCollapsedAtPointerUp = isPanelVisuallyCollapsed(
+            connectionPanelRef,
+            CONNECTION_COLLAPSED_HEIGHT_PX,
+            CONNECTION_COLLAPSED_EPSILON_PX,
+            typeof connectionPixelsAtPointerUp === "number" ? { inPixels: connectionPixelsAtPointerUp } : undefined
+        );
+        const result = engineFinalizeDrag({
+            lowerDragState: lowerDragStateRef.current,
+            leftLowerDragContext: leftLowerDragContextRef.current,
+            wasLowerSeparatorDragActive,
+            isConnectionPhysicallyCollapsedAtPointerUp,
+        });
+        logLowerSeparatorDebug("[lower-drag-finalize]", result.debug);
+        return { ...result, isConnectionPhysicallyCollapsedAtPointerUp };
+    };
+
+    const applyResetLowerDragState = () => {
+        const result = engineResetDrag({
+            setLowerSeparatorDragInProgress,
+            setConnectionLowerSeparatorMinPercent,
+            setConnectionLowerSeparatorLockActive,
+            onAfterReset: ({ lowerDragState, leftLowerDragContext }) => {
+                lowerDragStateRef.current = lowerDragState;
+                leftLowerDragContextRef.current = leftLowerDragContext;
+                syncLowerDragCompatRefsFromState(lowerDragState, leftLowerDragContext);
+                logLowerSeparatorDebug("[lower-drag-reset]", { phase: lowerDragState.phase });
+            },
+        });
+        return result;
+    };
+
+    // --- Panel Orchestration: left lane panel controller ---
+    // Created here so it can be used inside drag handlers.
+    // Note: deps that change each render (like connectionPanelCollapsed) are read inside closures below.
+    const leftLanePanelController = useMemo(() => {
+        return createLeftLanePanelController({
+            connectionPanelRef,
+            sendPanelRef,
+            responsePanelRef,
+            connectionPanelCollapsed,
+            sendPanelCollapsed,
+            responsePanelCollapsed,
+            connectionCollapsedHeightPx: CONNECTION_COLLAPSED_HEIGHT_PX,
+            responseCollapsedHeightPx: FRAME_PANEL_COLLAPSED_HEIGHT_PX,
+            isPanelVisuallyCollapsed,
+            getConnectionCollapsedSizePercent,
+            getSendCollapsedSizePercent,
+            getResponseCollapsedSizePercent,
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [connectionPanelCollapsed, sendPanelCollapsed, responsePanelCollapsed]);
 
     const normalizeLanguageTag = (raw: string) => {
         const trimmed = raw.trim();
@@ -976,19 +1167,13 @@ function App() {
     };
 
     const handleToggleConnectionPanel = () => {
-        lowerSeparatorDragActiveRef.current = false;
-        lowerSeparatorAllowConnectionCascadeRef.current = false;
-        lowerSeparatorCascadeTriggeredRef.current = false;
-        lowerSeparatorLockAfterSendCollapsedRef.current = false;
-        lowerSeparatorHardLockedRef.current = false;
+        // Reset new state machine + compat refs
         if (lowerSeparatorPointerMoveHandlerRef.current) {
             window.removeEventListener("pointermove", lowerSeparatorPointerMoveHandlerRef.current);
             lowerSeparatorPointerMoveHandlerRef.current = null;
         }
         flushSync(() => {
-            setLowerSeparatorDragInProgress(false);
-            setConnectionLowerSeparatorMinPercent(null);
-            setConnectionLowerSeparatorLockActive(false);
+            applyResetLowerDragState();
         });
         logLowerSeparatorDebug("connection-toggle-click", {
             connectionPanelCollapsed,
@@ -1070,9 +1255,16 @@ function App() {
         }
 
         // During lower separator drag with cascade allowed (threshold-triggered or Send already collapsed)
-        if (lowerSeparatorDragActiveRef.current && lowerSeparatorAllowConnectionCascadeRef.current) {
+        // Phase-based: cascade_active or cascade_releasing = cascade allowed; send_locked or dragging_free = blocked
+        const lowerPhase = lowerDragStateRef.current.phase;
+        const isDragActive = lowerDragStateRef.current.phase !== "idle";
+        const isCascadeAllowedPhase =
+            lowerPhase === "cascade_active" || lowerPhase === "cascade_releasing";
+        const isCascadeActive = isLowerCascadePhase(lowerPhase);
+
+        if (isDragActive && isCascadeAllowedPhase) {
             setResizeDebugBranch("drag-cascade");
-            if (lowerSeparatorCascadeTriggeredRef.current) {
+            if (isCascadeActive) {
                 if (isActuallyCollapsed && !connectionPanelCollapsed) {
                     const restoreSize = connectionResizeStartSizeRef.current ?? lastExpandedConnectionSizeRef.current;
                     if (typeof restoreSize === "number" && Number.isFinite(restoreSize) && restoreSize > 1) {
@@ -1088,7 +1280,7 @@ function App() {
         }
 
         // During lower separator drag with cascade blocked — lock height via temporary minSize.
-        if (lowerSeparatorDragActiveRef.current && !lowerSeparatorAllowConnectionCascadeRef.current) {
+        if (isDragActive && !isCascadeAllowedPhase) {
             setResizeDebugBranch("drag-blocked");
             setConnectionPanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
             return;
@@ -1448,11 +1640,11 @@ function App() {
             panelSize
         );
 
-        if (
-            lowerSeparatorDragActiveRef.current &&
-            lowerSeparatorCascadeTriggeredRef.current &&
-            !isActuallyCollapsed
-        ) {
+        const lowerPhase = lowerDragStateRef.current.phase;
+        const isCascadePhase = isLowerCascadePhase(lowerPhase);
+
+        // During cascade: keep send frozen as collapsed
+        if (isCascadePhase && !isActuallyCollapsed) {
             const collapsedPercent = getSendCollapsedSizePercent();
             sendPanelRef.current?.resize(`${collapsedPercent}%`);
             sendPanelRef.current?.collapse();
@@ -1465,25 +1657,30 @@ function App() {
             return;
         }
 
+        // During dragging_free: if send just got collapsed (not collapsed at start), enter send_locked
         if (
-            lowerSeparatorDragActiveRef.current &&
-            !lowerSeparatorSendCollapsedAtStartRef.current &&
-            !lowerSeparatorLockAfterSendCollapsedRef.current &&
-            !lowerSeparatorCascadeTriggeredRef.current &&
+            lowerPhase === "dragging_free" &&
+            !lowerDragStateRef.current.sendCollapsedAtStart &&
             isActuallyCollapsed
         ) {
-            lowerSeparatorLockAfterSendCollapsedRef.current = true;
-            lowerSeparatorHardLockedRef.current = false;
             const lockedResponse = responsePanelRef.current?.getSize().asPercentage;
-            if (typeof lockedResponse === "number" && Number.isFinite(lockedResponse)) {
-                lowerSeparatorLockedResponseSizeRef.current = lockedResponse;
-            }
             const lockedConnection =
-                lowerSeparatorConnectionSizeAtStartRef.current ?? connectionPanelRef.current?.getSize().asPercentage ?? null;
+                lowerDragStateRef.current.connectionSizeAtStart ?? connectionPanelRef.current?.getSize().asPercentage ?? null;
             if (typeof lockedConnection === "number" && Number.isFinite(lockedConnection) && lockedConnection > 0) {
                 setConnectionLowerSeparatorMinPercent(lockedConnection);
             }
-            lowerSeparatorAllowConnectionCascadeRef.current = false;
+            // Enter send_locked phase
+            applyMaybeEnterSendLocked(typeof lockedResponse === "number" && Number.isFinite(lockedResponse) ? lockedResponse : null);
+        }
+
+        // During send_locked: if send expands again (e.g. user drags back down), return to dragging_free
+        if (
+            lowerPhase === "send_locked" &&
+            !lowerDragStateRef.current.sendCollapsedAtStart &&
+            !isActuallyCollapsed
+        ) {
+            setConnectionLowerSeparatorMinPercent(null);
+            applyLowerDragPhaseTransition("dragging_free", "send-panel-resize-send-expanded");
         }
 
         if (isActuallyCollapsed) {
@@ -1493,18 +1690,6 @@ function App() {
             }
         } else if (sendCollapseSourceRef.current === null) {
             lastExpandedSendSizeRef.current = panelSize.asPercentage;
-        }
-
-        if (
-            lowerSeparatorDragActiveRef.current &&
-            !lowerSeparatorSendCollapsedAtStartRef.current &&
-            lowerSeparatorLockAfterSendCollapsedRef.current &&
-            !isActuallyCollapsed
-        ) {
-            lowerSeparatorLockAfterSendCollapsedRef.current = false;
-            lowerSeparatorHardLockedRef.current = false;
-            lowerSeparatorLockedResponseSizeRef.current = null;
-            setConnectionLowerSeparatorMinPercent(null);
         }
 
         setSendPanelCollapsed((prev) => (prev === isActuallyCollapsed ? prev : isActuallyCollapsed));
@@ -1533,15 +1718,6 @@ function App() {
             }
         }
 
-        lowerSeparatorDragActiveRef.current = true;
-        setLowerSeparatorDragInProgress(true);
-        lowerSeparatorSendCollapsedAtStartRef.current = sendPanelCollapsed;
-        lowerSeparatorAllowConnectionCascadeRef.current = false;
-        lowerSeparatorCascadeTriggeredRef.current = false;
-        lowerSeparatorLockAfterSendCollapsedRef.current = false;
-        lowerSeparatorHardLockedRef.current = false;
-        lowerSeparatorLockedResponseSizeRef.current = null;
-
         // Initialize Connection resize start size for potential cascade collapse
         if (!connectionPanelCollapsed) {
             const currentConnectionSize = connectionPanelRef.current?.getSize().asPercentage;
@@ -1550,16 +1726,26 @@ function App() {
             }
         }
 
-        const connectionSize = connectionPanelRef.current?.getSize().asPercentage;
-        lowerSeparatorConnectionSizeAtStartRef.current =
-            typeof connectionSize === "number" && Number.isFinite(connectionSize) ? connectionSize : null;
-        const connectionPixels = connectionPanelRef.current?.getSize().inPixels;
-        lowerSeparatorConnectionPixelsAtStartRef.current =
-            typeof connectionPixels === "number" && Number.isFinite(connectionPixels) ? connectionPixels : null;
-        lowerSeparatorConnectionCollapsedAtStartRef.current = isConnectionPhysicallyCollapsed();
-        lowerSeparatorPendingConnectionExpandRef.current = false;
+        // Use new state machine for drag initialization
+        const connectionSize = connectionPanelRef.current?.getSize();
+        setLowerSeparatorDragInProgress(true);
         setConnectionLowerSeparatorMinPercent(null);
         setConnectionLowerSeparatorLockActive(false);
+        lowerSeparatorPendingConnectionExpandRef.current = false;
+
+        applyBeginLowerSeparatorDrag({
+            startPointerY: null,
+            sendCollapsedAtStart: sendPanelCollapsed,
+            connectionCollapsedAtStart: isConnectionPhysicallyCollapsed(),
+            connectionPercentAtStart:
+                typeof connectionSize?.asPercentage === "number" && Number.isFinite(connectionSize.asPercentage)
+                    ? connectionSize.asPercentage
+                    : null,
+            connectionPixelsAtStart:
+                typeof connectionSize?.inPixels === "number" && Number.isFinite(connectionSize.inPixels)
+                    ? connectionSize.inPixels
+                    : null,
+        });
 
         // Pointer-based speed detection: track Y position to detect fast upward drag
         lowerSeparatorLastPointerYRef.current = null;
@@ -1579,6 +1765,15 @@ function App() {
             const lastTime = lowerSeparatorLastPointerTimeRef.current;
             const now = performance.now();
 
+            // Record startPointerY on first sample
+            if (leftLowerDragContextRef.current.startPointerY === null) {
+                leftLowerDragContextRef.current = {
+                    ...leftLowerDragContextRef.current,
+                    startPointerY: e.clientY,
+                    lastPointerY: e.clientY,
+                };
+            }
+
             if (typeof lastY === "number" && typeof lastTime === "number") {
                 const timeDelta = now - lastTime;
                 if (timeDelta >= LOWER_SEPARATOR_POINTER_MIN_SAMPLE_TIME_MS) {
@@ -1590,13 +1785,12 @@ function App() {
                             ? speed
                             : prevEma * (1 - LOWER_SEPARATOR_POINTER_SPEED_EMA_ALPHA) + speed * LOWER_SEPARATOR_POINTER_SPEED_EMA_ALPHA;
                     lowerSeparatorSpeedEmaRef.current = speedEma;
-                    const canEvaluateCascadeSpeed =
-                        lowerSeparatorDragActiveRef.current &&
-                        (lowerSeparatorSendCollapsedAtStartRef.current || lowerSeparatorLockAfterSendCollapsedRef.current);
-                    const isUpwardSpeedQualifiedSample =
-                        deltaY <= -LOWER_SEPARATOR_POINTER_MIN_UPWARD_DELTA_PX &&
+
+                    const phase = lowerDragStateRef.current.phase;
+                    const isUpwardDeltaQualified = deltaY <= -LOWER_SEPARATOR_POINTER_MIN_UPWARD_DELTA_PX;
+                    const isUpwardSpeedQualified =
+                        isUpwardDeltaQualified &&
                         Math.max(speed, speedEma) >= lowerSeparatorPointerMinTriggerSpeed;
-                    const isUpwardDeltaQualifiedSample = deltaY <= -LOWER_SEPARATOR_POINTER_MIN_UPWARD_DELTA_PX;
 
                     lowerSeparatorMoveSampleCountRef.current += 1;
                     if (lowerSeparatorDebugEnabled && lowerSeparatorMoveSampleCountRef.current % 8 === 0) {
@@ -1605,138 +1799,162 @@ function App() {
                             timeDelta,
                             speed,
                             speedEma,
+                            phase,
                             triggerSpeed: lowerSeparatorPointerTriggerSpeed,
                             upwardTravel: lowerSeparatorUpwardTravelRef.current,
                             upwardFastStreak: lowerSeparatorUpwardFastStreakRef.current,
-                            canEvaluateCascadeSpeed,
-                            cascadeTriggered: lowerSeparatorCascadeTriggeredRef.current,
-                            allowCascade: lowerSeparatorAllowConnectionCascadeRef.current,
                             connectionPanelSize: connectionPanelRef.current?.getSize(),
                             sendPanelSize: sendPanelRef.current?.getSize(),
                             responsePanelSize: responsePanelRef.current?.getSize(),
                         });
                     }
 
-                    if (canEvaluateCascadeSpeed) {
-                        if (isUpwardSpeedQualifiedSample) {
-                            lowerSeparatorUpwardTravelRef.current += -deltaY;
-                            lowerSeparatorUpwardFastStreakRef.current += 1;
-                        } else if (deltaY >= LOWER_SEPARATOR_POINTER_MIN_DOWNWARD_RELEASE_DELTA_PX) {
-                            if (lowerSeparatorCascadeTriggeredRef.current) {
-                                const currentResponseSize = responsePanelRef.current?.getSize().asPercentage ?? 0;
-                                const lockedResponseSize = lowerSeparatorLockedResponseSizeRef.current;
-                                const reachedResponseRestorePoint =
-                                    typeof lockedResponseSize === "number" &&
-                                    Number.isFinite(lockedResponseSize) &&
-                                    currentResponseSize <= lockedResponseSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
+                    if (isUpwardDeltaQualified) {
+                        // Check if send just became visually collapsed → enter send_locked
+                        if (phase === "dragging_free" && !lowerDragStateRef.current.sendCollapsedAtStart) {
+                            const lockedResponseSize = responsePanelRef.current?.getSize().asPercentage ?? null;
+                            applyMaybeEnterSendLocked(lockedResponseSize);
+                        }
 
-                                // 阶段1：先恢复 response 到锁定前大小，保持 send 折叠。
-                                if (!reachedResponseRestorePoint) {
-                                    const sendCollapsedPercent = getSendCollapsedSizePercent();
-                                    sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
-                                    sendPanelRef.current?.collapse();
-                                    setSendPanelCollapsed(true);
-                                    return;
+                        const currentPhase = lowerDragStateRef.current.phase;
+                        const canEvalCascade =
+                            currentPhase === "send_locked" ||
+                            (currentPhase === "dragging_free" && lowerDragStateRef.current.sendCollapsedAtStart) ||
+                            currentPhase === "cascade_active" ||
+                            currentPhase === "cascade_releasing";
+
+                        if (canEvalCascade) {
+                            if (isUpwardSpeedQualified) {
+                                lowerSeparatorUpwardTravelRef.current += -deltaY;
+                                lowerSeparatorUpwardFastStreakRef.current += 1;
+                            } else {
+                                lowerSeparatorUpwardFastStreakRef.current = 0;
+                            }
+                        } else {
+                            lowerSeparatorUpwardTravelRef.current = 0;
+                            lowerSeparatorUpwardFastStreakRef.current = 0;
+                        }
+
+                        // Cascade trigger conditions
+                        const shouldTriggerCascadeNoSpeedGate =
+                            lowerDragStateRef.current.sendCollapsedAtStart && isUpwardDeltaQualified;
+                        const shouldTriggerCascadeSpeedGate =
+                            isUpwardSpeedQualified &&
+                            lowerSeparatorUpwardTravelRef.current >= LOWER_SEPARATOR_POINTER_MIN_TRIGGER_TRAVEL_PX &&
+                            lowerSeparatorUpwardFastStreakRef.current >= LOWER_SEPARATOR_POINTER_MIN_TRIGGER_STREAK;
+
+                        const notYetCascading =
+                            currentPhase !== "cascade_active" && currentPhase !== "cascade_releasing";
+                        if (notYetCascading && (shouldTriggerCascadeNoSpeedGate || shouldTriggerCascadeSpeedGate)) {
+                            logLowerSeparatorDebug("cascade-triggered", {
+                                deltaY,
+                                timeDelta,
+                                speed,
+                                speedEma,
+                                triggerSpeed: lowerSeparatorPointerTriggerSpeed,
+                                upwardTravel: lowerSeparatorUpwardTravelRef.current,
+                                upwardFastStreak: lowerSeparatorUpwardFastStreakRef.current,
+                                connectionSize: connectionPanelRef.current?.getSize(),
+                                sendSize: sendPanelRef.current?.getSize(),
+                                responseSize: responsePanelRef.current?.getSize(),
+                                triggerMode: shouldTriggerCascadeNoSpeedGate ? "send-collapsed-no-speed-gate" : "speed-gated",
+                            });
+
+                            // Freeze send panel
+                            const isActuallySendCollapsed = isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX);
+                            if (!isActuallySendCollapsed) {
+                                const collapsedPercent = getSendCollapsedSizePercent();
+                                sendPanelRef.current?.resize(`${collapsedPercent}%`);
+                                sendPanelRef.current?.collapse();
+                                flushSync(() => { setSendPanelCollapsed(true); });
+                            }
+
+                            // Lock response size
+                            const lockedResponse = responsePanelRef.current?.getSize().asPercentage;
+                            if (typeof lockedResponse === "number" && Number.isFinite(lockedResponse)) {
+                                lowerDragStateRef.current = {
+                                    ...lowerDragStateRef.current,
+                                    lockedResponseSize: lockedResponse,
+                                };
+                                leftLowerDragContextRef.current = {
+                                    ...leftLowerDragContextRef.current,
+                                    lockedResponseSize: lockedResponse,
+                                };
+                                lowerSeparatorLockedResponseSizeRef.current = lockedResponse;
+                                lowerSeparatorHardLockedRef.current = true;
+                            }
+
+                            if (!connectionPanelCollapsed && !connectionCollapseAnimatingRef.current) {
+                                const currentSize = connectionPanelRef.current?.getSize().asPercentage;
+                                if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
+                                    lastExpandedConnectionSizeRef.current = currentSize;
                                 }
+                            }
 
-                                // 阶段2：达到恢复点后释放级联，允许继续下拖展开 send；
-                                // 若拖拽开始前 send/connection 已折叠，则优先展开其对应面板。
-                                lowerSeparatorCascadeTriggeredRef.current = false;
-                                lowerSeparatorAllowConnectionCascadeRef.current = false;
+                            flushSync(() => {
+                                setConnectionLowerSeparatorMinPercent(null);
+                                setConnectionLowerSeparatorLockActive(false);
+                            });
+                            lowerSeparatorPendingConnectionExpandRef.current = false;
+                            applyMaybeEnterCascadeActive(true);
+                        }
+                    } else if (deltaY >= LOWER_SEPARATOR_POINTER_MIN_DOWNWARD_RELEASE_DELTA_PX) {
+                        // Downward drag: attempt cascade releasing
+                        lowerSeparatorUpwardTravelRef.current = 0;
+                        lowerSeparatorUpwardFastStreakRef.current = 0;
+
+                        const currentPhaseForDown = lowerDragStateRef.current.phase;
+                        if (currentPhaseForDown === "cascade_active") {
+                            applyMaybeEnterCascadeReleasing(deltaY);
+                        }
+
+                        if (
+                            currentPhaseForDown === "cascade_active" ||
+                            currentPhaseForDown === "cascade_releasing"
+                        ) {
+                            const currentResponseSize = responsePanelRef.current?.getSize().asPercentage ?? 0;
+                            const lockedResponseSize = lowerDragStateRef.current.lockedResponseSize;
+                            const reachedRestorePoint =
+                                typeof lockedResponseSize === "number" &&
+                                Number.isFinite(lockedResponseSize) &&
+                                currentResponseSize <= lockedResponseSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
+
+                            // Stage 1: keep send collapsed, wait for response to restore
+                            if (!reachedRestorePoint) {
+                                const sendCollapsedPercent = getSendCollapsedSizePercent();
+                                sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
+                                sendPanelRef.current?.collapse();
+                                setSendPanelCollapsed(true);
+                                return;
+                            }
+
+                            // Stage 2: restore point reached → release cascade
+                            const releaseResult = applyMaybeReleaseCascade(currentResponseSize);
+                            if (releaseResult.changed) {
                                 lowerSeparatorPendingConnectionExpandRef.current = true;
-                                lowerSeparatorHardLockedRef.current = false;
-                                lowerSeparatorLockAfterSendCollapsedRef.current = false;
-
-                                if (lowerSeparatorSendCollapsedAtStartRef.current) {
+                                if (lowerDragStateRef.current.sendCollapsedAtStart) {
                                     sendPanelRef.current?.expand();
                                     setSendPanelCollapsed(false);
                                 }
-                                if (lowerSeparatorConnectionCollapsedAtStartRef.current) {
+                                if (lowerDragStateRef.current.connectionCollapsedAtStart) {
                                     connectionPanelRef.current?.expand();
                                     setConnectionPanelCollapsed(false);
                                 }
-
-                                lowerSeparatorLockedResponseSizeRef.current = null;
                             }
-
-                            // 只有明确向下回拖时重置速度追踪
-                            lowerSeparatorUpwardTravelRef.current = 0;
-                            lowerSeparatorUpwardFastStreakRef.current = 0;
-                        } else if (deltaY > 0) {
-                            lowerSeparatorUpwardFastStreakRef.current = 0;
-                        } else {
-                            lowerSeparatorUpwardFastStreakRef.current = 0;
                         }
-                    } else {
-                        lowerSeparatorUpwardTravelRef.current = 0;
+                    } else if (deltaY > 0) {
                         lowerSeparatorUpwardFastStreakRef.current = 0;
-                    }
-
-                    const shouldTriggerCascadeWithoutSpeedGate =
-                        lowerSeparatorSendCollapsedAtStartRef.current && isUpwardDeltaQualifiedSample;
-                    const shouldTriggerCascadeWithSpeedGate =
-                        isUpwardSpeedQualifiedSample &&
-                        lowerSeparatorUpwardTravelRef.current >= LOWER_SEPARATOR_POINTER_MIN_TRIGGER_TRAVEL_PX &&
-                        lowerSeparatorUpwardFastStreakRef.current >= LOWER_SEPARATOR_POINTER_MIN_TRIGGER_STREAK;
-
-                    if (
-                        canEvaluateCascadeSpeed &&
-                        !lowerSeparatorCascadeTriggeredRef.current &&
-                        (shouldTriggerCascadeWithoutSpeedGate || shouldTriggerCascadeWithSpeedGate)
-                    ) {
-                        // Threshold reached while dragging up: enable cascade and collapse Connection UI
-                        logLowerSeparatorDebug("cascade-triggered", {
-                            deltaY,
-                            timeDelta,
-                            speed,
-                            speedEma,
-                            triggerSpeed: lowerSeparatorPointerTriggerSpeed,
-                            upwardTravel: lowerSeparatorUpwardTravelRef.current,
-                            upwardFastStreak: lowerSeparatorUpwardFastStreakRef.current,
-                            connectionSize: connectionPanelRef.current?.getSize(),
-                            sendSize: sendPanelRef.current?.getSize(),
-                            responseSize: responsePanelRef.current?.getSize(),
-                            triggerMode: shouldTriggerCascadeWithoutSpeedGate ? "send-collapsed-no-speed-gate" : "speed-gated",
-                        });
-                        lowerSeparatorAllowConnectionCascadeRef.current = true;
-                        lowerSeparatorCascadeTriggeredRef.current = true;
-                        lowerSeparatorPendingConnectionExpandRef.current = false;
-                        flushSync(() => {
-                            setConnectionLowerSeparatorMinPercent(null);
-                            setConnectionLowerSeparatorLockActive(false);
-                        });
-
-                        // 立即冻结send面板，防止在connection动画期间被自动推大
-                        const isActuallySendCollapsed = isPanelVisuallyCollapsed(
-                            sendPanelRef,
-                            CONNECTION_COLLAPSED_HEIGHT_PX
-                        );
-                        if (!isActuallySendCollapsed) {
-                            const collapsedPercent = getSendCollapsedSizePercent();
-                            sendPanelRef.current?.resize(`${collapsedPercent}%`);
-                            sendPanelRef.current?.collapse();
-                            flushSync(() => {
-                                setSendPanelCollapsed(true);
-                            });
-                        }
-                        
-                        // 锁定response大小，防止send在connection动画期间被自动推大
-                        const lockedResponse = responsePanelRef.current?.getSize().asPercentage;
-                        if (typeof lockedResponse === "number" && Number.isFinite(lockedResponse)) {
-                            lowerSeparatorLockedResponseSizeRef.current = lockedResponse;
-                            lowerSeparatorHardLockedRef.current = true;
-                        }
-
-                        if (!connectionPanelCollapsed && !connectionCollapseAnimatingRef.current) {
-                            const currentSize = connectionPanelRef.current?.getSize().asPercentage;
-                            if (typeof currentSize === "number" && Number.isFinite(currentSize)) {
-                                lastExpandedConnectionSizeRef.current = currentSize;
-                            }
-                        }
+                    } else {
+                        lowerSeparatorUpwardFastStreakRef.current = 0;
                     }
                 }
             }
 
+            // Update context lastPointerY
+            leftLowerDragContextRef.current = {
+                ...leftLowerDragContextRef.current,
+                lastPointerY: e.clientY,
+            };
             lowerSeparatorLastPointerYRef.current = e.clientY;
             lowerSeparatorLastPointerTimeRef.current = now;
         };
@@ -1836,47 +2054,43 @@ function App() {
             return;
         }
 
-        // 下分隔条高速拖拽期间冻结 response 状态，避免 onResize 中反复 resize 回拉导致闪烁。
-        if (
-            lowerSeparatorDragActiveRef.current &&
-            (lowerSeparatorCascadeTriggeredRef.current || lowerSeparatorLockAfterSendCollapsedRef.current)
-        ) {
-            if (lowerSeparatorCascadeTriggeredRef.current) {
-                const lockedSize = lowerSeparatorLockedResponseSizeRef.current;
-                if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
-                    const hasReachedRestorePoint = panelSize.asPercentage <= lockedSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
-                    if (!hasReachedRestorePoint) {
-                        const sendCollapsedPercent = getSendCollapsedSizePercent();
-                        if (!isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX)) {
-                            sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
-                            sendPanelRef.current?.collapse();
-                            setSendPanelCollapsed(true);
-                        }
-                        return;
-                    }
+        // Phase-based: freeze response during cascade and send_locked phases
+        const lowerPhase = lowerDragStateRef.current.phase;
+        const isCascadePhase = isLowerCascadePhase(lowerPhase);
+        const isSendLockedPhase = lowerPhase === "send_locked";
 
-                    lowerSeparatorCascadeTriggeredRef.current = false;
-                    lowerSeparatorAllowConnectionCascadeRef.current = false;
-                    lowerSeparatorHardLockedRef.current = false;
-                    lowerSeparatorLockAfterSendCollapsedRef.current = false;
-                    lowerSeparatorLockedResponseSizeRef.current = null;
+        if (isCascadePhase) {
+            // During cascade: freeze response at locked size, keep send collapsed
+            const lockedSize = lowerDragStateRef.current.lockedResponseSize;
+            if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
+                const hasReachedRestorePoint = panelSize.asPercentage <= lockedSize + PANEL_DRAG_CLAMP_EPSILON_PERCENT;
+                if (!hasReachedRestorePoint) {
+                    const sendCollapsedPercent = getSendCollapsedSizePercent();
+                    if (!isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX)) {
+                        sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
+                        sendPanelRef.current?.collapse();
+                        setSendPanelCollapsed(true);
+                    }
+                    return;
+                }
+                // Restore point reached: transition to dragging_free via state machine
+                applyLowerDragPhaseTransition("dragging_free", "response-panel-resize-restore-point");
+            }
+            return;
+        }
+
+        if (isSendLockedPhase) {
+            // During send_locked: freeze response at locked size, keep send collapsed
+            const lockedSize = lowerDragStateRef.current.lockedResponseSize;
+            if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
+                if (Math.abs(panelSize.asPercentage - lockedSize) > 0.05) {
+                    responsePanelRef.current?.resize(`${lockedSize}%`);
                 }
             }
-
-            if (lowerSeparatorLockAfterSendCollapsedRef.current && !lowerSeparatorCascadeTriggeredRef.current) {
-                const lockedSize = lowerSeparatorLockedResponseSizeRef.current;
-                if (typeof lockedSize === "number" && Number.isFinite(lockedSize)) {
-                    if (Math.abs(panelSize.asPercentage - lockedSize) > 0.05) {
-                        responsePanelRef.current?.resize(`${lockedSize}%`);
-                    }
-                }
-
-                const sendCollapsedPercent = getSendCollapsedSizePercent();
-                if (!isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX)) {
-                    sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
-                    sendPanelRef.current?.collapse();
-                }
-                return;
+            const sendCollapsedPercent = getSendCollapsedSizePercent();
+            if (!isPanelVisuallyCollapsed(sendPanelRef, CONNECTION_COLLAPSED_HEIGHT_PX)) {
+                sendPanelRef.current?.resize(`${sendCollapsedPercent}%`);
+                sendPanelRef.current?.collapse();
             }
             return;
         }
@@ -1894,34 +2108,21 @@ function App() {
 
     useEffect(() => {
         const handlePointerUp = () => {
-            const wasLowerSeparatorDragActive = lowerSeparatorDragActiveRef.current;
-            const connectionPixelsAtPointerUp = connectionPanelRef.current?.getSize().inPixels;
-            const isConnectionPhysicallyCollapsedAtPointerUp = isPanelVisuallyCollapsed(
-                connectionPanelRef,
-                CONNECTION_COLLAPSED_HEIGHT_PX,
-                CONNECTION_COLLAPSED_EPSILON_PX,
-                typeof connectionPixelsAtPointerUp === "number" ? { inPixels: connectionPixelsAtPointerUp } : undefined
-            );
-            const shouldFinalizeConnectionCollapse =
-                wasLowerSeparatorDragActive &&
-                lowerSeparatorCascadeTriggeredRef.current &&
-                isConnectionPhysicallyCollapsedAtPointerUp;
+            // Use new finalize helper (reads from lowerDragStateRef / leftLowerDragContextRef)
+            const finalizeResult = applyFinalizeLowerSeparatorDrag();
+
             logLowerSeparatorDebug("pointer-up-summary", {
-                shouldFinalizeConnectionCollapse,
-                isConnectionPhysicallyCollapsedAtPointerUp,
-                connectionPixelsAtPointerUp,
+                ...finalizeResult.debug,
                 connectionPanelCollapsed,
                 connectionPanelIsCollapsed: connectionPanelRef.current?.isCollapsed(),
                 connectionPanelSize: connectionPanelRef.current?.getSize(),
                 sendPanelSize: sendPanelRef.current?.getSize(),
                 responsePanelSize: responsePanelRef.current?.getSize(),
-                lowerSeparatorCascadeTriggered: lowerSeparatorCascadeTriggeredRef.current,
-                lowerSeparatorAllowCascade: lowerSeparatorAllowConnectionCascadeRef.current,
                 lowerSeparatorPendingExpand: lowerSeparatorPendingConnectionExpandRef.current,
-                lowerSeparatorConnectionSizeAtStart: lowerSeparatorConnectionSizeAtStartRef.current,
-                lowerSeparatorConnectionPixelsAtStart: lowerSeparatorConnectionPixelsAtStartRef.current,
                 connectionLowerSeparatorMinPercent,
             });
+
+            // Reset non-lower-separator drag tracking refs
             connectionResizeDraggingRef.current = false;
             connectionResizeStartSizeRef.current = null;
             connectionCollapsedAtResizeStartRef.current = false;
@@ -1933,39 +2134,34 @@ function App() {
             frameDetailResizeStartSizeRef.current = null;
             sendResizeDraggingRef.current = false;
             sendResizeStartSizeRef.current = null;
-            lowerSeparatorDragActiveRef.current = false;
-            lowerSeparatorSendCollapsedAtStartRef.current = false;
-            lowerSeparatorAllowConnectionCascadeRef.current = false;
-            lowerSeparatorCascadeTriggeredRef.current = false;
-            lowerSeparatorLockAfterSendCollapsedRef.current = false;
-            lowerSeparatorHardLockedRef.current = false;
-            lowerSeparatorLockedResponseSizeRef.current = null;
-            lowerSeparatorConnectionSizeAtStartRef.current = null;
-            lowerSeparatorConnectionPixelsAtStartRef.current = null;
-            lowerSeparatorConnectionCollapsedAtStartRef.current = false;
-            lowerSeparatorPendingConnectionExpandRef.current = false;
+
+            // Reset speed tracking refs
             lowerSeparatorLastPointerYRef.current = null;
             lowerSeparatorLastPointerTimeRef.current = null;
             lowerSeparatorSpeedEmaRef.current = null;
             lowerSeparatorUpwardTravelRef.current = 0;
             lowerSeparatorUpwardFastStreakRef.current = 0;
-            setConnectionLowerSeparatorMinPercent(null);
-            setConnectionLowerSeparatorLockActive(false);
-            setLowerSeparatorDragInProgress(false);
+            lowerSeparatorPendingConnectionExpandRef.current = false;
+
             // Remove pointermove handler
             if (lowerSeparatorPointerMoveHandlerRef.current) {
                 window.removeEventListener("pointermove", lowerSeparatorPointerMoveHandlerRef.current);
                 lowerSeparatorPointerMoveHandlerRef.current = null;
             }
-            if (wasLowerSeparatorDragActive) {
-                if (shouldFinalizeConnectionCollapse) {
+
+            // Apply finalize result to connection panel state
+            if (finalizeResult.nextConnectionPanelCollapsed !== null) {
+                if (finalizeResult.shouldFinalizeConnectionCollapse) {
                     setConnectionPanelCollapsed(true);
-                    collapseSourceRef.current = "drag";
+                    collapseSourceRef.current = finalizeResult.nextCollapseSource;
                 } else {
-                    setConnectionPanelCollapsed(isConnectionPhysicallyCollapsedAtPointerUp);
+                    setConnectionPanelCollapsed(finalizeResult.isConnectionPhysicallyCollapsedAtPointerUp);
                     collapseSourceRef.current = null;
                 }
             }
+
+            // Reset new state machine (also resets compat refs via syncLowerDragCompatRefsFromState)
+            applyResetLowerDragState();
         };
         window.addEventListener("pointerup", handlePointerUp);
         window.addEventListener("pointercancel", handlePointerUp);
