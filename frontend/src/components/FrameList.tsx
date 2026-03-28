@@ -24,11 +24,21 @@ export function FrameList(props: Props) {
     };
 
     const payloadPreview = (frame: Frame) => {
+        const isBinary = (frame.type || "").toLowerCase() === "binary";
         const text = (frame.text && frame.text.trim()) || "";
         const ascii = (frame.ascii && frame.ascii.trim()) || "";
         const summary = (frame.summary && frame.summary.trim()) || "";
         const base64 = (frame.base64 && frame.base64.trim()) || "";
         const hex = (frame.hex && frame.hex.trim()) || "";
+
+        if (isBinary) {
+            if (hex) return `[hex] ${hex.slice(0, 64)}${hex.length > 64 ? "..." : ""}`;
+            if (base64) return `[base64] ${base64.slice(0, 64)}${base64.length > 64 ? "..." : ""}`;
+            if (ascii) return ascii;
+            if (text) return text;
+            if (summary) return summary;
+            return "(empty payload)";
+        }
 
         if (text) return text;
         if (ascii) return ascii;

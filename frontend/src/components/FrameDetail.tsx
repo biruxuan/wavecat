@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import type { Frame } from "../types";
 
 type Props = {
@@ -5,6 +6,8 @@ type Props = {
     collapsed: boolean;
     onToggleCollapsed: () => void;
 };
+
+type PayloadMode = "hex" | "base64" | "ascii" | "text" | "summary";
 
 const T = {
     bg: "var(--sys-background)",
@@ -21,33 +24,67 @@ function formatTimestamp(timestamp: number): string {
     return new Date(timestamp).toLocaleString();
 }
 
-function buildPayloadView(frame: Frame): string {
-    if (frame.text && frame.text.trim()) {
-        try {
-            return JSON.stringify(JSON.parse(frame.text), null, 2);
-        } catch {
-            return frame.text;
-        }
+function hasModePayload(frame: Frame, mode: PayloadMode): boolean {
+    switch (mode) {
+        case "hex":
+            return Boolean(frame.hex && frame.hex.trim());
+        case "base64":
+            return Boolean(frame.base64 && frame.base64.trim());
+        case "ascii":
+            return Boolean(frame.ascii && frame.ascii.trim());
+        case "text":
+            return Boolean(frame.text && frame.text.trim());
+        case "summary":
+            return Boolean(frame.summary && frame.summary.trim());
+        default:
+            return false;
     }
-
-    if (frame.ascii && frame.ascii.trim()) return frame.ascii;
-    if (frame.base64 && frame.base64.trim()) return frame.base64;
-    if (frame.hex && frame.hex.trim()) return frame.hex;
-    if (frame.summary && frame.summary.trim()) return frame.summary;
-
-    return "(empty payload)";
 }
 
-function payloadSource(frame: Frame): string {
-    if (frame.text && frame.text.trim()) return "text";
-    if (frame.ascii && frame.ascii.trim()) return "ascii";
-    if (frame.base64 && frame.base64.trim()) return "base64";
-    if (frame.hex && frame.hex.trim()) return "hex";
-    if (frame.summary && frame.summary.trim()) return "summary";
-    return "none";
+function payloadByMode(frame: Frame, mode: PayloadMode): string {
+    if (mode === "hex") {
+        return frame.hex?.trim() || "(hex payload unavailable)";
+    }
+    if (mode === "base64") {
+        return frame.base64?.trim() || "(base64 payload unavailable)";
+    }
+    if (mode === "ascii") {
+        return frame.ascii?.trim() || "(ascii payload unavailable)";
+    }
+    if (mode === "summary") {
+        return frame.summary?.trim() || "(summary payload unavailable)";
+    }
+
+    const text = frame.text?.trim() || "";
+    if (!text) {
+        return "(text payload unavailable)";
+    }
+    try {
+        return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+        return text;
+    }
 }
 
 export function FrameDetail(props: Props) {
+    const [payloadMode, setPayloadMode] = useState<PayloadMode>("hex");
+
+    useEffect(() => {
+        if (!props.frame) {
+            setPayloadMode("hex");
+            return;
+        }
+
+        const priority: PayloadMode[] = ["hex", "base64", "ascii", "text", "summary"];
+        const preferred = priority.find((mode) => hasModePayload(props.frame as Frame, mode));
+        setPayloadMode(preferred || "hex");
+    }, [props.frame?.id]);
+
+    const payloadText = useMemo(() => {
+        if (!props.frame) return "";
+        return payloadByMode(props.frame, payloadMode);
+    }, [props.frame, payloadMode]);
+
     if (props.collapsed) {
         return (
             <div
@@ -129,7 +166,27 @@ export function FrameDetail(props: Props) {
                                 size: <span style={{ color: T.title }}>{props.frame.size || 0} bytes</span>
                             </div>
                             <div style={{ color: T.dim }}>
-                                payload source: <span style={{ color: T.title }}>{payloadSource(props.frame)}</span>
+                                payload source:
+                                <select
+                                    value={payloadMode}
+                                    onChange={(e) => setPayloadMode(e.target.value as PayloadMode)}
+                                    style={{
+                                        marginLeft: "8px",
+                                        background: "var(--sys-surface)",
+                                        border: `1px solid ${T.border}`,
+                                        color: T.title,
+                                        borderRadius: "4px",
+                                        padding: "2px 6px",
+                                        fontFamily: "monospace",
+                                        fontSize: "12px",
+                                    }}
+                                >
+                                    <option value="hex">hex</option>
+                                    <option value="base64">base64</option>
+                                    <option value="ascii">ascii</option>
+                                    <option value="text">text</option>
+                                    <option value="summary">summary</option>
+                                </select>
                             </div>
                         </div>
 
@@ -147,7 +204,7 @@ export function FrameDetail(props: Props) {
                                 color: T.title,
                             }}
                         >
-                            {buildPayloadView(props.frame)}
+                            {payloadText}
                         </div>
                     </div>
                 ) : (
