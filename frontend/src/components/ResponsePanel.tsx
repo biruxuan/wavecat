@@ -1,450 +1,191 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { Frame, SessionSummary } from "../types";
+import React from "react";
+import type { Frame } from "../types";
 
-const WAVEFORM_MODE_STORAGE_KEY = "wavecat.responseWaveformMode";
-const SLOT_SEC = 0.05; // 50ms per waveform point
-const WINDOW_SEC = 10;
-const BARS_PER_WINDOW = Math.round(WINDOW_SEC / SLOT_SEC); // 200
-const WAVEFORM_VIEW_WIDTH = 560;
-const WAVEFORM_VIEW_HEIGHT = 128;
-
-type Props = {
-  frame?: Frame;
-  sessionSummary?: SessionSummary;
-  liveText?: string;
-  playbackWaveform?: number[];
-  playbackPositionSec?: number;
-  playbackTotalDurationSec?: number;
-  collapsed?: boolean;
-  dragActive?: boolean;
-  onToggleCollapsed?: () => void;
+const T = {
+    bg: '#0e141b',
+    surface0: '#090f16',
+    surface1: '#131920',
+    ghost: 'rgba(255,255,255,0.06)',
+    outline: 'rgba(255,255,255,0.35)',
+    textDim: 'rgba(255,255,255,0.4)',
+    primary: '#a4e6ff',
+    primaryCont: '#00d1ff',
 };
 
-function ResponsePanelInner({
-  frame,
-  sessionSummary,
-  liveText,
-  playbackWaveform = [],
-  playbackPositionSec = 0,
-  playbackTotalDurationSec = 0,
-  collapsed = false,
-  dragActive = false,
-  onToggleCollapsed,
-}: Props) {
-  const [showWaveform, setShowWaveform] = useState(true);
-  const [waveformMode, setWaveformMode] = useState<"envelope" | "scope">(() => {
-    try {
-      const stored = window.localStorage.getItem(WAVEFORM_MODE_STORAGE_KEY);
-      return stored === "scope" ? "scope" : "envelope";
-    } catch {
-      return "envelope";
-    }
-  });
-  const [manualScrollBar, setManualScrollBar] = useState(0);
-  const stableWaveformRef = useRef<number[]>(playbackWaveform);
-  const stablePlaybackPositionRef = useRef(playbackPositionSec);
-  const stablePlaybackDurationRef = useRef(playbackTotalDurationSec);
-  const stableFrameRef = useRef(frame);
-  const stableSessionSummaryRef = useRef(sessionSummary);
-  const stableLiveTextRef = useRef(liveText);
+type Props = {
+    frame: Frame | null | undefined;
+    sessionSummary: any;
+    liveText: string;
+    playbackWaveform: number[];
+    playbackPositionSec: number;
+    playbackTotalDurationSec: number;
+    collapsed: boolean;
+    dragActive: boolean;
+    onToggleCollapsed: () => void;
+};
 
-  if (!dragActive) {
-    stableWaveformRef.current = playbackWaveform;
-    stablePlaybackPositionRef.current = playbackPositionSec;
-    stablePlaybackDurationRef.current = playbackTotalDurationSec;
-    stableFrameRef.current = frame;
-    stableSessionSummaryRef.current = sessionSummary;
-    stableLiveTextRef.current = liveText;
-  }
-
-  const effectivePlaybackWaveform = dragActive ? stableWaveformRef.current : playbackWaveform;
-  const effectivePlaybackPositionSec = dragActive ? stablePlaybackPositionRef.current : playbackPositionSec;
-  const effectivePlaybackDurationSec = dragActive ? stablePlaybackDurationRef.current : playbackTotalDurationSec;
-  const effectiveFrame = dragActive ? stableFrameRef.current : frame;
-  const effectiveSessionSummary = dragActive ? stableSessionSummaryRef.current : sessionSummary;
-  const effectiveLiveText = dragActive ? stableLiveTextRef.current : liveText;
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(WAVEFORM_MODE_STORAGE_KEY, waveformMode);
-    } catch {
-      // ignore localStorage errors
-    }
-  }, [waveformMode]);
-
-  const totalBars = effectivePlaybackWaveform.length;
-  const needsSlider = totalBars > BARS_PER_WINDOW;
-  // Active playback: audio is enqueued AND position hasn't reached the end
-  const isPlaying = effectivePlaybackDurationSec > 0 && effectivePlaybackPositionSec < effectivePlaybackDurationSec - 0.01;
-  const playedBars = useMemo(() => {
-    if (totalBars <= 0) return 0;
-    if (effectivePlaybackDurationSec > 0) {
-      const ratio = Math.max(0, Math.min(1, effectivePlaybackPositionSec / effectivePlaybackDurationSec));
-      return ratio * totalBars;
-    }
-    return effectivePlaybackPositionSec / SLOT_SEC;
-  }, [effectivePlaybackPositionSec, effectivePlaybackDurationSec, totalBars]);
-  const barsInView = Math.min(BARS_PER_WINDOW, totalBars);
-
-  // Compute window start and cursor position
-  const { windowStart, cursorBarFloat } = useMemo(() => {
-    if (!isPlaying) {
-      return { windowStart: needsSlider ? manualScrollBar : 0, cursorBarFloat: -1 };
-    }
-    if (totalBars <= BARS_PER_WINDOW) {
-      return { windowStart: 0, cursorBarFloat: playedBars };
-    }
-    const halfWindow = BARS_PER_WINDOW / 2;
-    if (playedBars <= halfWindow) {
-      return { windowStart: 0, cursorBarFloat: playedBars };
-    }
-    if (totalBars - playedBars <= halfWindow) {
-      const ws = totalBars - BARS_PER_WINDOW;
-      return { windowStart: ws, cursorBarFloat: playedBars - ws };
-    }
-    return { windowStart: playedBars - halfWindow, cursorBarFloat: halfWindow };
-  }, [isPlaying, totalBars, playedBars, needsSlider, manualScrollBar]);
-
-  const sampleWaveformAt = (data: number[], indexFloat: number): number => {
-    if (data.length === 0) return 0;
-    const clamped = Math.max(0, Math.min(data.length - 1, indexFloat));
-    const left = Math.floor(clamped);
-    const right = Math.min(data.length - 1, left + 1);
-    const frac = clamped - left;
-    const lv = data[left] ?? 0;
-    const rv = data[right] ?? lv;
-    return lv + (rv - lv) * frac;
-  };
-
-  const viewStartInt = Math.max(0, Math.floor(windowStart));
-  const viewOffsetBars = Math.max(0, windowStart - viewStartInt);
-  const visibleBars = useMemo(() => {
-    // +1 keeps right edge filled when we shift by fractional offset
-    return effectivePlaybackWaveform.slice(viewStartInt, viewStartInt + barsInView + 1);
-  }, [effectivePlaybackWaveform, viewStartInt, barsInView]);
-
-  // When playback ends, sync slider to last playback position
-  const wasPlayingRef = useRef(false);
-  useEffect(() => {
-    if (wasPlayingRef.current && !isPlaying && needsSlider) {
-      setManualScrollBar(Math.max(0, totalBars - BARS_PER_WINDOW));
-    }
-    wasPlayingRef.current = isPlaying;
-  }, [isPlaying, needsSlider, totalBars]);
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setManualScrollBar(Number(e.target.value));
-  };
-
-  const sliderValue = isPlaying
-    ? Math.max(0, Math.min(totalBars - barsInView, windowStart))
-    : manualScrollBar;
-
-  // Catmull-Rom to cubic bezier smooth path
-  const smoothPath = (points: [number, number][]): string => {
-    if (points.length < 2) return "";
-    if (points.length === 2)
-      return `M${points[0][0].toFixed(2)},${points[0][1].toFixed(2)} L${points[1][0].toFixed(2)},${points[1][1].toFixed(2)}`;
-    const n = points.length;
-    let d = `M${points[0][0].toFixed(2)},${points[0][1].toFixed(2)}`;
-    for (let i = 0; i < n - 1; i++) {
-      const p0 = points[Math.max(0, i - 1)];
-      const p1 = points[i];
-      const p2 = points[i + 1];
-      const p3 = points[Math.min(n - 1, i + 2)];
-      const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
-      const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
-      const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
-      const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
-      d += ` C${cp1x.toFixed(2)},${cp1y.toFixed(2)} ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
-    }
-    return d;
-  };
-
-  const renderEnvelopeWaveform = (
-    bars: number[],
-    cursorFloat: number,
-    offsetBars = 0,
-    width = WAVEFORM_VIEW_WIDTH,
-    height = WAVEFORM_VIEW_HEIGHT
-  ) => {
-    if (bars.length === 0) {
-      return (
-        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="empty received audio waveform">
-          <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
-          <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
-        </svg>
-      );
-    }
-
-    const barPxWidth = width / BARS_PER_WINDOW; // each bar always same width
-    const filledWidth = bars.length * barPxWidth;
-    const maxBarHeight = Math.max(8, height - 8);
-    const midY = height / 2;
-    const cursorPx = cursorFloat >= 0 ? Math.min(filledWidth, cursorFloat * barPxWidth) : -1;
-
-    const cursorAmp = sampleWaveformAt(bars, cursorFloat + offsetBars);
-
-    const upperPts: [number, number][] = bars.map((value, index) => [
-      (index + 0.5 - offsetBars) * barPxWidth,
-      midY - value * (maxBarHeight / 2),
-    ] as [number, number]);
-    const lowerPts: [number, number][] = bars.map((value, index) => [
-      (index + 0.5 - offsetBars) * barPxWidth,
-      midY + value * (maxBarHeight / 2),
-    ] as [number, number]).reverse();
-
-    const upperD = smoothPath(upperPts);
-    const lowerD = smoothPath(lowerPts);
-    // Closed fill path: upper curve → line to last lower → lower curve → close
-    const fillD = upperD + ` L${lowerPts[0][0].toFixed(2)},${lowerPts[0][1].toFixed(2)} ` +
-      lowerD.replace(/^M[^ ]+/, "") + " Z";
-
-    return (
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="received audio envelope waveform">
-        <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
-        {cursorPx >= 0 && (
-          <>
-            <rect x="0" y="0" width={cursorPx} height={height} fill="rgba(100,220,160,0.10)" />
-            <rect x={cursorPx} y="0" width={Math.max(0, filledWidth - cursorPx)} height={height} fill="rgba(255,255,255,0.03)" />
-          </>
-        )}
-        <line x1="0" y1={midY} x2={width} y2={midY} stroke="rgba(255,255,255,0.24)" strokeWidth="1" />
-        <path d={fillD} fill="rgba(100,200,255,0.35)" stroke="rgba(100,200,255,0.95)" strokeWidth="1.1" />
-        {cursorPx >= 0 && (
-          <>
-            <line x1={cursorPx} y1="0" x2={cursorPx} y2={height} stroke="rgba(255,204,90,0.95)" strokeWidth="1.2" />
-            <circle cx={cursorPx} cy={midY - cursorAmp * (maxBarHeight / 2)} r="2.2" fill="rgba(255,204,90,0.95)" />
-            <circle cx={cursorPx} cy={midY + cursorAmp * (maxBarHeight / 2)} r="2.2" fill="rgba(255,204,90,0.95)" />
-          </>
-        )}
-      </svg>
-    );
-  };
-
-  const renderScopeWaveform = (
-    bars: number[],
-    cursorFloat: number,
-    offsetBars = 0,
-    width = WAVEFORM_VIEW_WIDTH,
-    height = WAVEFORM_VIEW_HEIGHT
-  ) => {
-    if (bars.length === 0) {
-      return (
-        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="empty received audio scope waveform">
-          <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
-          <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="rgba(255,255,255,0.18)" strokeWidth="1" />
-        </svg>
-      );
-    }
-
-    const barPxWidth = width / BARS_PER_WINDOW;
-    const filledWidth = bars.length * barPxWidth;
-    const midY = height / 2;
-    const maxAmp = Math.max(8, (height - 8) / 2);
-    const cursorPx = cursorFloat >= 0 ? Math.min(filledWidth, cursorFloat * barPxWidth) : -1;
-
-    const cursorAmp = sampleWaveformAt(bars, cursorFloat + offsetBars);
-
-    const tracePts: [number, number][] = bars.map((value, index) => [
-      (index + 0.5 - offsetBars) * barPxWidth,
-      midY - value * maxAmp,
-    ] as [number, number]);
-    const traceD = smoothPath(tracePts);
-
-    return (
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" width="100%" height={height} style={{ display: "block" }} role="img" aria-label="received audio scope waveform">
-        <rect x="0" y="0" width={width} height={height} fill="rgba(255,255,255,0.04)" />
-        {cursorPx >= 0 && (
-          <>
-            <rect x="0" y="0" width={cursorPx} height={height} fill="rgba(100,220,160,0.10)" />
-            <rect x={cursorPx} y="0" width={Math.max(0, filledWidth - cursorPx)} height={height} fill="rgba(255,255,255,0.03)" />
-          </>
-        )}
-        <line x1="0" y1={midY} x2={width} y2={midY} stroke="rgba(255,255,255,0.24)" strokeWidth="1" />
-        <path d={traceD} fill="none" stroke="rgba(120,220,255,0.95)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        {cursorPx >= 0 && (
-          <>
-            <line x1={cursorPx} y1="0" x2={cursorPx} y2={height} stroke="rgba(255,204,90,0.95)" strokeWidth="1.2" />
-            <circle cx={cursorPx} cy={midY - cursorAmp * maxAmp} r="2.4" fill="rgba(255,204,90,0.95)" />
-          </>
-        )}
-      </svg>
-    );
-  };
-
-  return (
-    <section className="panel response-panel">
-      <div className="response-panel-header">
-        <div className="panel-title">Response Body</div>
-        {onToggleCollapsed && (
-          <button
-            type="button"
-            className="connection-collapse-button"
-            aria-label={collapsed ? "Expand response panel" : "Collapse response panel"}
-            title={collapsed ? "Expand" : "Collapse"}
-            onClick={onToggleCollapsed}
-          >
-            <svg
-              className={`collapse-chevron${collapsed ? " is-collapsed" : ""}`}
-              viewBox="0 0 12 12"
-              aria-hidden="true"
-            >
-              <path d="M3 4.5L6 7.5L9 4.5" />
-            </svg>
-          </button>
-        )}
-      </div>
-      <div className={`response-body-wrap${collapsed ? " collapsed" : ""}${dragActive ? " drag-active" : ""}`}>
-        <div className="response-body-inner">
-          {!effectiveFrame && !effectiveSessionSummary && !effectiveLiveText ? <div className="placeholder">No inbound response yet.</div> : null}
-
-      <div className="live-text-block">
-        <div className="waveform-header">
-          <div className="live-text-label">Received Audio Waveform</div>
-          <div className="waveform-actions">
-            <div className="waveform-mode-group" role="group" aria-label="Waveform mode">
-              <button
-                type="button"
-                className={waveformMode === "envelope" ? "waveform-mode-button active" : "waveform-mode-button"}
-                onClick={() => setWaveformMode("envelope")}
-              >
-                Envelope
-              </button>
-              <button
-                type="button"
-                className={waveformMode === "scope" ? "waveform-mode-button active" : "waveform-mode-button"}
-                onClick={() => setWaveformMode("scope")}
-              >
-                Scope
-              </button>
-            </div>
-            <button type="button" className="waveform-toggle" onClick={() => setShowWaveform((prev) => !prev)}>
-              {showWaveform ? "Hide Waveform" : "Show Waveform"}
-            </button>
-          </div>
-        </div>
-        {showWaveform && (
-          <>
-            {waveformMode === "envelope"
-              ? renderEnvelopeWaveform(visibleBars, cursorBarFloat, viewOffsetBars)
-              : renderScopeWaveform(visibleBars, cursorBarFloat, viewOffsetBars)}
-            {needsSlider && (
-              <div className="waveform-slider-wrap">
-                <input
-                  type="range"
-                  className="waveform-slider"
-                  min={0}
-                  max={Math.max(0, totalBars - barsInView)}
-                  step="any"
-                  value={sliderValue}
-                  onChange={handleSliderChange}
-                />
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {effectiveLiveText ? (
-        <div className="live-text-block">
-          <div className="live-text-label">Assistant Response</div>
-          <pre className="live-text">{effectiveLiveText}</pre>
-        </div>
-      ) : null}
-
-      {effectiveSessionSummary ? (
-        <>
-          <h4>Session Summary</h4>
-          <div className="detail-meta">
-            <span>Profile: {effectiveSessionSummary.profileType}</span>
-            <span>Status: {effectiveSessionSummary.status || "idle"}</span>
-            {effectiveSessionSummary.error ? <span>Error: {effectiveSessionSummary.error}</span> : null}
-            {effectiveSessionSummary.startedFrame ? <span>Started Frame: {effectiveSessionSummary.startedFrame.id}</span> : null}
-            {effectiveSessionSummary.finalFrame ? <span>Final Frame: {effectiveSessionSummary.finalFrame.id}</span> : null}
-            {effectiveSessionSummary.sessionFinishedFrame ? <span>Session Finished Frame: {effectiveSessionSummary.sessionFinishedFrame.id}</span> : null}
-            {typeof effectiveSessionSummary.extractedAudioChunks === "number" ? <span>Audio Chunks: {effectiveSessionSummary.extractedAudioChunks}</span> : null}
-            {typeof effectiveSessionSummary.extractedAudioBytes === "number" ? <span>Audio Bytes: {effectiveSessionSummary.extractedAudioBytes}</span> : null}
-          </div>
-
-          {effectiveSessionSummary.extractedText ? (
-            <>
-              <h4>Extracted Text</h4>
-              <pre>{effectiveSessionSummary.extractedText}</pre>
-            </>
-          ) : null}
-
-          {effectiveSessionSummary.finalFrame?.text ? (
-            <>
-              <h4>Final Event / JSON</h4>
-              <pre>{effectiveSessionSummary.finalFrame.text}</pre>
-            </>
-          ) : null}
-
-          {effectiveSessionSummary.sessionFinishedFrame?.text ? (
-            <>
-              <h4>Session Finished / JSON</h4>
-              <pre>{effectiveSessionSummary.sessionFinishedFrame.text}</pre>
-            </>
-          ) : null}
-        </>
-      ) : null}
-
-      {effectiveFrame ? (
-        <>
-          <div className="detail-meta">
-            <span>ID: {effectiveFrame.id}</span>
-            <span>Type: {effectiveFrame.type}</span>
-            <span>Size: {effectiveFrame.size}</span>
-            <span>Time: {new Date(effectiveFrame.timestamp).toLocaleTimeString()}</span>
-          </div>
-          <h4>Summary</h4>
-          <pre>{effectiveFrame.summary}</pre>
-
-          {effectiveFrame.text ? (
-            <>
-              <h4>Text / JSON</h4>
-              <pre>{effectiveFrame.text}</pre>
-            </>
-          ) : null}
-
-          {effectiveFrame.hex ? (
-            <>
-              <h4>HEX</h4>
-              <pre>{effectiveFrame.hex}</pre>
-            </>
-          ) : null}
-
-          {effectiveFrame.ascii ? (
-            <>
-              <h4>ASCII</h4>
-              <pre>{effectiveFrame.ascii}</pre>
-            </>
-          ) : null}
-        </>
-      ) : null}
-        </div>
-      </div>
-    </section>
-  );
+function formatTime(secs: number): string {
+    const s = Math.floor(Math.max(0, secs));
+    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
-export const ResponsePanel = memo(ResponsePanelInner, (prevProps, nextProps) => {
-  if (prevProps.dragActive && nextProps.dragActive) {
-    return (
-      prevProps.collapsed === nextProps.collapsed &&
-      prevProps.dragActive === nextProps.dragActive
-    );
-  }
+function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
-  return (
-    prevProps.frame === nextProps.frame &&
-    prevProps.sessionSummary === nextProps.sessionSummary &&
-    prevProps.liveText === nextProps.liveText &&
-    prevProps.playbackWaveform === nextProps.playbackWaveform &&
-    prevProps.playbackPositionSec === nextProps.playbackPositionSec &&
-    prevProps.playbackTotalDurationSec === nextProps.playbackTotalDurationSec &&
-    prevProps.collapsed === nextProps.collapsed &&
-    prevProps.dragActive === nextProps.dragActive
-  );
-});
+function statusColor(status: string | undefined): string {
+    if (!status) return T.textDim;
+    switch (status) {
+        case 'running': return '#4ade80';
+        case 'done': return T.primaryCont;
+        case 'error': return '#f87171';
+        default: return T.textDim;
+    }
+}
+
+export function ResponsePanel(props: Props) {
+    if (props.collapsed) {
+        return (
+            <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: T.surface0 }} onClick={props.onToggleCollapsed}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.1em', textTransform: "uppercase", fontSize: "11px", color: T.outline, fontWeight: 600 }}>RESPONSE STREAM</div>
+                <div style={{ fontSize: '14px', color: T.textDim }}>▲</div>
+            </div>
+        );
+    }
+
+    const BARS = 60;
+    const waveSlots = props.playbackWaveform.slice(-BARS);
+    const hasWave = waveSlots.length > 0;
+
+    const recentSlots = props.playbackWaveform.slice(-5);
+    const peakLevel = recentSlots.length > 0 ? Math.max(...recentSlots) : 0;
+    const levelBarsActive = Math.round(peakLevel * 20);
+
+    const totalDur = props.playbackTotalDurationSec || 0;
+    const positionSec = props.playbackPositionSec || 0;
+    const progressPct = totalDur > 0 ? Math.min(100, (positionSec / totalDur) * 100) : 0;
+
+    const displayText = props.liveText || props.sessionSummary?.extractedText || "";
+
+    const handleCopy = () => {
+        if (displayText) navigator.clipboard.writeText(displayText).catch(() => {});
+    };
+
+    return (
+        <section style={{ display: 'flex', flexDirection: 'column', height: '100%', background: T.bg }}>
+
+            {/* Header */}
+            <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", boxShadow: `0 0 0 1px ${T.ghost}` }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.1em', textTransform: 'uppercase', color: '#fff', fontSize: '11px', fontWeight: 700 }}>
+                    Audio Waveform
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '10px', color: T.textDim, fontFamily: "'JetBrains Mono', monospace" }}>Level</span>
+                    <div style={{ display: 'flex', gap: '2px' }}>
+                        {[...Array(20)].map((_, i) => {
+                            const active = i < levelBarsActive;
+                            const color = i < 13 ? T.primaryCont : i < 17 ? '#fbbf24' : '#ef4444';
+                            return <div key={i} style={{ width: '3px', height: '12px', background: active ? color : 'rgba(255,255,255,0.08)', borderRadius: '1px', transition: 'background 0.1s' }} />;
+                        })}
+                    </div>
+                </div>
+            </div>
+
+            {/* Waveform */}
+            <div style={{ padding: '12px 16px', boxShadow: `0 0 0 1px ${T.ghost}` }}>
+                <div style={{ height: '96px', background: T.surface0, borderRadius: '6px', position: 'relative', overflow: 'hidden', display: 'flex', alignItems: 'center' }}>
+                    <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: '1px', background: 'rgba(0,209,255,0.18)' }} />
+                    {hasWave ? (
+                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', padding: '0 8px', gap: '2px' }}>
+                            {waveSlots.map((amp, i) => {
+                                const h = Math.max(2, amp * 90);
+                                const op = 0.4 + amp * 0.55;
+                                return (
+                                    <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', justifyContent: 'center' }}>
+                                        <div style={{ width: '100%', height: `${h / 2}%`, background: T.primaryCont, opacity: op, borderRadius: '2px 2px 0 0' }} />
+                                        <div style={{ width: '100%', height: `${h / 2}%`, background: T.primaryCont, opacity: op * 0.6, borderRadius: '0 0 2px 2px' }} />
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <div style={{ width: '100%', textAlign: 'center', fontSize: '11px', color: T.textDim, fontFamily: "'JetBrains Mono', monospace" }}>
+                            No audio signal
+                        </div>
+                    )}
+                    <div style={{ position: 'absolute', right: '10px', top: '6px', fontSize: '10px', color: T.textDim, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {peakLevel > 0 ? `${(20 * Math.log10(Math.max(0.001, peakLevel))).toFixed(1)} dB` : '—'}
+                    </div>
+                </div>
+            </div>
+
+            {/* Session stats */}
+            <div style={{ display: 'flex', boxShadow: `0 0 0 1px ${T.ghost}` }}>
+                <div style={{ flex: 1, padding: '10px 14px', borderRight: `1px solid ${T.ghost}` }}>
+                    <div style={{ fontSize: '10px', color: T.textDim, fontFamily: "'JetBrains Mono', monospace", textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>Chunks</div>
+                    <div style={{ fontSize: '18px', color: T.primary, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                        {props.sessionSummary?.extractedAudioChunks ?? 0}
+                    </div>
+                </div>
+                <div style={{ flex: 1, padding: '10px 14px', borderRight: `1px solid ${T.ghost}` }}>
+                    <div style={{ fontSize: '10px', color: T.textDim, fontFamily: "'JetBrains Mono', monospace", textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>Audio</div>
+                    <div style={{ fontSize: '18px', color: T.primary, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                        {props.sessionSummary?.extractedAudioBytes > 0 ? formatBytes(props.sessionSummary.extractedAudioBytes) : '—'}
+                    </div>
+                </div>
+                <div style={{ flex: 1, padding: '10px 14px' }}>
+                    <div style={{ fontSize: '10px', color: T.textDim, fontFamily: "'JetBrains Mono', monospace", textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '3px' }}>Status</div>
+                    <div style={{ fontSize: '12px', color: statusColor(props.sessionSummary?.status), fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, textTransform: 'uppercase' }}>
+                        {props.sessionSummary?.status || 'idle'}
+                    </div>
+                </div>
+            </div>
+
+            {/* Transcription */}
+            <div style={{ flex: 1, padding: '12px 16px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.08em', textTransform: 'uppercase', color: '#fff', fontSize: '11px', fontWeight: 700 }}>
+                        Live Transcription
+                    </div>
+                    <button
+                        onClick={handleCopy}
+                        disabled={!displayText}
+                        style={{ background: 'transparent', border: 'none', color: displayText ? T.primaryCont : T.textDim, cursor: displayText ? 'pointer' : 'default', fontSize: '11px', padding: '2px 6px', fontFamily: "'JetBrains Mono', monospace" }}
+                    >
+                        Copy
+                    </button>
+                </div>
+                <div style={{ flex: 1, overflowY: 'auto', background: T.surface0, borderRadius: '6px', boxShadow: `0 0 0 1px ${T.ghost}`, padding: '12px', fontFamily: "'JetBrains Mono', monospace", fontSize: '12px', lineHeight: 1.7, minHeight: 0 }}>
+                    {displayText ? (
+                        <span style={{ color: '#e2e8f0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{displayText}</span>
+                    ) : (
+                        <span style={{ color: T.textDim }}>Waiting for transcription data…</span>
+                    )}
+                </div>
+            </div>
+
+            {/* Playback controls */}
+            <div style={{ padding: '12px 16px', boxShadow: `0 0 0 1px ${T.ghost}`, background: T.surface1 }}>
+                <div style={{ width: '100%', height: '3px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', position: 'relative', marginBottom: '10px' }}>
+                    <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${progressPct}%`, background: `linear-gradient(90deg, ${T.primaryCont}, #7c3aed)`, borderRadius: '2px', transition: 'width 0.25s ease' }} />
+                    {progressPct > 0 && (
+                        <div style={{ position: 'absolute', left: `${progressPct}%`, top: '50%', transform: 'translate(-50%, -50%)', width: '9px', height: '9px', borderRadius: '50%', background: '#fff', boxShadow: `0 0 4px ${T.primaryCont}` }} />
+                    )}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', gap: '14px', color: T.textDim, fontSize: '16px' }}>
+                        <span style={{ cursor: 'pointer' }}>⏮</span>
+                        <span style={{ cursor: 'pointer', color: totalDur > 0 ? '#fff' : T.textDim }}>⏯</span>
+                        <span style={{ cursor: 'pointer' }}>⏭</span>
+                    </div>
+                    <div style={{ fontSize: '11px', color: T.outline, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {formatTime(positionSec)} / {formatTime(totalDur)}
+                    </div>
+                </div>
+            </div>
+
+        </section>
+    );
+}

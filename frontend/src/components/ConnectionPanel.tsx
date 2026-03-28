@@ -64,7 +64,10 @@ export function ConnectionPanel(props: Props) {
   };
 
   return (
-    <form className="panel connection-panel" onSubmit={handleSubmit}>
+    <form className="panel connection-panel" onSubmit={handleSubmit} style={{ position: 'relative' }}>
+      {connected && (
+         <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '2px', background: 'var(--sys-primary-container)', boxShadow: '0 0 8px var(--sys-primary-container)', zIndex: 10 }}></div>
+      )}
       <div className="connection-panel-header">
         <div className="connection-collapsed-left">
           <span className="panel-title">Connection</span>

@@ -1,6 +1,5 @@
+import React from "react";
 import type { Frame } from "../types";
-
-const MAX_RENDER_FRAMES = 500;
 
 type Props = {
   frames: Frame[];
@@ -17,119 +16,167 @@ type Props = {
   onTypeFilterChange: (value: string) => void;
 };
 
-export function FrameList({
-  frames,
-  selectedId,
-  collapsed,
-  searchText,
-  directionFilter,
-  typeFilter,
-  onToggleCollapsed,
-  onSelect,
-  onClear,
-  onSearchTextChange,
-  onDirectionFilterChange,
-  onTypeFilterChange,
-}: Props) {
-  const normalizedSearch = searchText.trim().toLowerCase();
-  const filteredFrames = frames.filter((frame) => {
-    const matchDirection = directionFilter === "all" || frame.direction === directionFilter;
-    const matchType = typeFilter === "all" || frame.type === typeFilter;
-    const haystack = `${frame.summary} ${frame.text ?? ""} ${frame.type} ${frame.direction}`.toLowerCase();
-    const matchSearch = !normalizedSearch || haystack.includes(normalizedSearch);
-    return matchDirection && matchType && matchSearch;
-  });
-  const visibleFrames =
-    filteredFrames.length > MAX_RENDER_FRAMES ? filteredFrames.slice(-MAX_RENDER_FRAMES) : filteredFrames;
+export function FrameList(props: Props) {
+    const formatTime = (ts: number) => {
+        if (!Number.isFinite(ts) || ts <= 0) return "--:--:--";
+        const d = new Date(ts);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+    };
 
-  return (
-    <section className="panel frame-list-panel">
-      <div className="frame-list-panel-header">
-        <div className="panel-title">
-          Frame List
-          {collapsed && <span className="status-text frame-list-count"> {filteredFrames.length}/{frames.length}</span>}
-        </div>
-        <div className="frame-list-actions">
-          {!collapsed && <button type="button" onClick={onClear}>Clear</button>}
-        </div>
-        <button
-          type="button"
-          className="connection-collapse-button"
-          aria-label={collapsed ? "Expand frame list" : "Collapse frame list"}
-          title={collapsed ? "Expand" : "Collapse"}
-          onClick={onToggleCollapsed}
-        >
-          <svg
-            className={`collapse-chevron${collapsed ? " is-collapsed" : ""}`}
-            viewBox="0 0 12 12"
-            aria-hidden="true"
-          >
-            <path d="M3 4.5L6 7.5L9 4.5" />
-          </svg>
-        </button>
-      </div>
-      <div className={`frame-list-body-wrap${collapsed ? " collapsed" : ""}`}>
-        <div className="frame-list-body-inner">
-          <div className="audio-grid">
-            <label className="field">
-              <span>Search</span>
-              <input value={searchText} onChange={(event) => onSearchTextChange(event.target.value)} placeholder="summary / text" />
-            </label>
-            <label className="field">
-              <span>Direction</span>
-              <select value={directionFilter} onChange={(event) => onDirectionFilterChange(event.target.value)}>
-                <option value="all">All</option>
-                <option value="in">In</option>
-                <option value="out">Out</option>
-                <option value="system">System</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Type</span>
-              <select value={typeFilter} onChange={(event) => onTypeFilterChange(event.target.value)}>
-                <option value="all">All</option>
-                <option value="text">text</option>
-                <option value="binary">binary</option>
-                <option value="ping">ping</option>
-                <option value="event">event</option>
-                <option value="unknown">unknown</option>
-              </select>
-            </label>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Dir</th>
-                  <th>Type</th>
-                  <th>Size</th>
-                  <th>Summary</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleFrames.map((frame) => (
-                  <tr
-                    key={frame.id}
-                    className={selectedId === frame.id ? "selected" : ""}
-                    onClick={() => onSelect(frame.id)}
-                  >
-                    <td>{new Date(frame.timestamp).toLocaleTimeString()}</td>
-                    <td>{frame.direction}</td>
-                    <td>{frame.type}</td>
-                    <td>{frame.size}</td>
-                    <td title={frame.summary}>{frame.summary}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="status-text">
-            已过滤 {filteredFrames.length} / 总计 {frames.length}
-            {filteredFrames.length > MAX_RENDER_FRAMES ? `，仅渲染最近 ${MAX_RENDER_FRAMES} 条` : ""}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
+    const payloadPreview = (frame: Frame) => {
+        const text = (frame.text && frame.text.trim()) || "";
+        const ascii = (frame.ascii && frame.ascii.trim()) || "";
+        const summary = (frame.summary && frame.summary.trim()) || "";
+        const base64 = (frame.base64 && frame.base64.trim()) || "";
+        const hex = (frame.hex && frame.hex.trim()) || "";
+
+        if (text) return text;
+        if (ascii) return ascii;
+        if (summary) return summary;
+        if (base64) return `[base64] ${base64.slice(0, 64)}${base64.length > 64 ? "..." : ""}`;
+        if (hex) return `[hex] ${hex.slice(0, 64)}${hex.length > 64 ? "..." : ""}`;
+        return "(empty payload)";
+    };
+
+    const normalizedSearch = props.searchText.trim().toLowerCase();
+    const filtered = props.frames.filter((frame) => {
+        if (props.directionFilter !== "all" && frame.direction !== props.directionFilter) {
+            return false;
+        }
+        if (props.typeFilter !== "all" && frame.type !== props.typeFilter) {
+            return false;
+        }
+        if (!normalizedSearch) {
+            return true;
+        }
+        const haystack = [
+            frame.type,
+            frame.summary,
+            frame.text,
+            frame.ascii,
+            frame.base64,
+            frame.hex,
+            frame.direction,
+            String(frame.id),
+        ]
+            .filter(Boolean)
+            .join("\n")
+            .toLowerCase();
+        return haystack.includes(normalizedSearch);
+    });
+
+    const types = Array.from(new Set(props.frames.map((f) => f.type).filter(Boolean))).sort();
+    const displayFrames = [...filtered].slice(-200).reverse();
+
+    if (props.collapsed) {
+        return (
+            <div style={{ padding: "12px", borderBottom: "1px solid var(--sys-outline-variant)", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={props.onToggleCollapsed}>
+                <div style={{ fontWeight: 600, fontSize: "14px", color: "var(--sys-outline)", textTransform: "uppercase" }}>FRAME LIST</div>
+            </div>
+        );
+    }
+
+    return (
+        <section style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--sys-background)' }}>
+            <div style={{ padding: "16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: '1px solid var(--sys-outline-variant)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ fontFamily: 'var(--font-display)', letterSpacing: '0.05em', textTransform: 'uppercase', color: '#fff', fontSize: '14px', fontWeight: 600 }}>
+                        Frame / Response List
+                    </div>
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                    <select
+                        value={props.typeFilter}
+                        onChange={(e) => props.onTypeFilterChange(e.target.value)}
+                        style={{ background: 'var(--sys-surface)', border: '1px solid var(--sys-outline-variant)', color: '#fff', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}
+                    >
+                        <option value="all">All Types</option>
+                        {types.map((type) => (
+                            <option key={type} value={type}>{type}</option>
+                        ))}
+                    </select>
+                    <select
+                        value={props.directionFilter}
+                        onChange={(e) => props.onDirectionFilterChange(e.target.value)}
+                        style={{ background: 'var(--sys-surface)', border: '1px solid var(--sys-outline-variant)', color: '#fff', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}
+                    >
+                        <option value="all">All Dir</option>
+                        <option value="in">Inbound</option>
+                        <option value="out">Outbound</option>
+                        <option value="system">System</option>
+                    </select>
+                    <input
+                        type="text"
+                        value={props.searchText}
+                        onChange={(e) => props.onSearchTextChange(e.target.value)}
+                        placeholder="Search..."
+                        style={{ background: 'var(--sys-surface)', border: '1px solid var(--sys-outline-variant)', color: '#fff', padding: '4px 8px', width: '120px', borderRadius: '4px', fontSize: '12px' }}
+                    />
+                    <button onClick={props.onClear} style={{ background: 'transparent', border: '1px solid var(--sys-outline-variant)', color: 'var(--sys-outline)', padding: '4px 8px', borderRadius: '4px', fontSize: '12px', cursor: 'pointer' }}>Clear</button>
+                </div>
+            </div>
+            
+            <div style={{ display: 'flex', padding: '8px 16px', background: 'var(--sys-surface-lowest)', borderBottom: '1px solid var(--sys-outline-variant)', fontSize: '10px', color: 'var(--sys-outline)', textTransform: 'uppercase' }}>
+                <div style={{ width: '40px' }}>TYPE</div>
+                <div style={{ width: '60px' }}>TIME</div>
+                <div style={{ flex: 1 }}>PAYLOAD CONTENT</div>
+                <div style={{ width: '80px', textAlign: 'right' }}>METRICS</div>
+            </div>
+            
+            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+                {displayFrames.length > 0 ? displayFrames.map((frame, i) => {
+                    const isSys = frame.direction === 'system' || frame.type === 'system';
+                    const isSelected = props.selectedId === frame.id;
+                    const tag = frame.direction === "in" ? "IN" : frame.direction === "out" ? "OUT" : "SYS";
+                    const tagColor = frame.direction === "in" ? '#00d1ff' : frame.direction === "out" ? '#f472b6' : '#a3a3a3';
+                    return (
+                        <div 
+                            key={frame.id || i}
+                            onClick={() => props.onSelect(frame.id)}
+                            style={{ 
+                                display: 'flex', 
+                                padding: '12px 16px', 
+                                borderBottom: '1px solid var(--sys-outline-variant)',
+                                background: isSelected ? 'var(--sys-surface-highest)' : 'transparent',
+                                cursor: 'pointer',
+                                alignItems: 'flex-start',
+                                gap: '8px'
+                            }}
+                        >
+                            <div style={{ width: '40px' }}>
+                                <span style={{ 
+                                    background: `${tagColor}22`, 
+                                    color: tagColor, 
+                                    padding: '2px 4px', 
+                                    borderRadius: '4px', 
+                                    fontSize: '10px',
+                                    fontWeight: 600
+                                }}>
+                                    {tag}
+                                </span>
+                            </div>
+                            <div style={{ width: '60px', fontSize: '10px', color: 'var(--sys-outline)', fontFamily: 'monospace' }}>
+                                {formatTime(frame.timestamp)}
+                            </div>
+                            <div style={{ flex: 1, overflow: 'hidden' }}>
+                                <div style={{ color: '#fff', fontSize: '12px', fontWeight: 600, marginBottom: '4px' }}>
+                                    {frame.type || 'Message'}
+                                </div>
+                                <div style={{ color: 'var(--sys-outline)', fontSize: '10px', fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {payloadPreview(frame)}
+                                </div>
+                            </div>
+                            <div style={{ width: '80px', textAlign: 'right', fontSize: '10px', color: 'var(--sys-outline)', fontFamily: 'monospace' }}>
+                                {frame.size || 0}B
+                            </div>
+                        </div>
+                    );
+                }) : (
+                    <div style={{ padding: '16px', color: 'var(--sys-outline)', fontSize: '12px', textAlign: 'center' }}>
+                        No frames recorded
+                    </div>
+                )}
+            </div>
+        </section>
+    );
 }
