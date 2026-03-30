@@ -2,6 +2,8 @@
 
 WaveCat 是一个基于 Wails + React + TypeScript 的 AI Voice Debugger，用于 WebSocket 音频调试、帧观察与请求发送联调。
 
+> ⚠️ **警告**：本项目正在开发中，功能不稳定，暂不可用于生产环境。
+
 ## 顶部导航界面预览
 
 ### 资源映射界面
