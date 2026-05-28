@@ -83,6 +83,7 @@ func (c *Client) Connect(config model.ConnectionConfig) error {
 	c.reading = true
 	c.mu.Unlock()
 
+	conn.SetReadLimit(4 * 1024 * 1024) // 4MB
 	c.store.Add(frame.BuildEventFrame("Connected", ""))
 	go c.readLoop(readCtx, conn)
 	return nil
