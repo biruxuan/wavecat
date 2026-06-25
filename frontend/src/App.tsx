@@ -73,9 +73,20 @@ function App() {
         headerRules: AudioHeaderFieldRule[];
     };
 
+    type HeaderEntry = { key: string; value: string; enabled: boolean };
+    type AuthType = "none" | "bearer" | "apikey" | "basic";
+    type AuthConfig = {
+        bearerToken: string;
+        apiKey: { key: string; value: string; addTo: "header" | "query" };
+        basicAuth: { username: string; password: string };
+    };
+
     type LastDraftConfig = {
         url: string;
-        headersText: string;
+        headersList: HeaderEntry[];
+        authType: AuthType;
+        authConfig: AuthConfig;
+        headersText?: string;
         queryParamsText: string;
         subprotocol: string;
         textPayload: string;
@@ -92,8 +103,16 @@ function App() {
         sessionProfile: SessionProfileType;
     };
 
+    const DEFAULT_AUTH_CONFIG: AuthConfig = {
+        bearerToken: "",
+        apiKey: { key: "", value: "", addTo: "header" },
+        basicAuth: { username: "", password: "" },
+    };
+
     const [url, setUrl] = useState("ws://127.0.0.1:8080/ws");
-    const [headersText, setHeadersText] = useState("{}");
+    const [headersList, setHeadersList] = useState<HeaderEntry[]>([]);
+    const [authType, setAuthType] = useState<AuthType>("none");
+    const [authConfig, setAuthConfig] = useState<AuthConfig>({ ...DEFAULT_AUTH_CONFIG });
     const [queryParamsText, setQueryParamsText] = useState("{}");
     const [subprotocol, setSubprotocol] = useState("");
     const [statusText, setStatusText] = useState("disconnected");
@@ -357,7 +376,16 @@ function App() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [probeDetailsOpen, setProbeDetailsOpen] = useState(false);
     const [savedConnections, setSavedConnections] = useState<
-        Array<{ name: string; url: string; headersText: string; queryParamsText: string; subprotocol: string }>
+        Array<{
+            name: string;
+            url: string;
+            headersList?: HeaderEntry[];
+            authType?: AuthType;
+            authConfig?: AuthConfig;
+            headersText?: string;
+            queryParamsText: string;
+            subprotocol: string;
+        }>
     >([]);
     const [sessionSummary, setSessionSummary] = useState<SessionSummary>({
         profileType: "translation",
@@ -2416,7 +2444,10 @@ function App() {
                 const parsed = JSON.parse(raw) as Array<{
                     name: string;
                     url: string;
-                    headersText: string;
+                    headersList?: HeaderEntry[];
+                    authType?: AuthType;
+                    authConfig?: AuthConfig;
+                    headersText?: string;
                     queryParamsText: string;
                     subprotocol: string;
                 }>;
@@ -2429,7 +2460,24 @@ function App() {
             if (rawDraft) {
                 const draft = JSON.parse(rawDraft) as Partial<LastDraftConfig>;
                 if (typeof draft.url === "string") setUrl(draft.url);
-                if (typeof draft.headersText === "string") setHeadersText(draft.headersText);
+                if (Array.isArray(draft.headersList)) {
+                    setHeadersList(draft.headersList);
+                } else if (typeof draft.headersText === "string") {
+                    try {
+                        const parsed = JSON.parse(draft.headersText) as Record<string, unknown>;
+                        setHeadersList(
+                            Object.entries(parsed).map(([k, v]) => ({ key: k, value: String(v), enabled: true }))
+                        );
+                    } catch {
+                        setHeadersList([]);
+                    }
+                }
+                if (draft.authType === "none" || draft.authType === "bearer" || draft.authType === "apikey" || draft.authType === "basic") {
+                    setAuthType(draft.authType);
+                }
+                if (draft.authConfig && typeof draft.authConfig === "object") {
+                    setAuthConfig(draft.authConfig);
+                }
                 if (typeof draft.queryParamsText === "string") setQueryParamsText(draft.queryParamsText);
                 if (typeof draft.subprotocol === "string") setSubprotocol(draft.subprotocol);
                 if (typeof draft.textPayload === "string") setTextPayload(draft.textPayload);
@@ -2654,7 +2702,9 @@ function App() {
     useEffect(() => {
         const draft: LastDraftConfig = {
             url,
-            headersText,
+            headersList,
+            authType,
+            authConfig,
             queryParamsText,
             subprotocol,
             textPayload,
@@ -2673,7 +2723,9 @@ function App() {
         window.localStorage.setItem("wavecat.lastDraftConfig", JSON.stringify(draft));
     }, [
         url,
-        headersText,
+        headersList,
+        authType,
+        authConfig,
         queryParamsText,
         subprotocol,
         textPayload,
@@ -2796,8 +2848,36 @@ function App() {
         );
     };
 
-    const parseHeaders = (): Record<string, string> => parseStringMap(headersText, "Headers");
-    const parseQueryParams = (): Record<string, string> => parseStringMap(queryParamsText, "Query Params");
+    const parseHeaders = (): Record<string, string> => {
+        const result: Record<string, string> = {};
+        for (const h of headersList) {
+            if (h.enabled && h.key.trim()) {
+                result[h.key.trim()] = h.value;
+            }
+        }
+        if (authType === "bearer" && authConfig.bearerToken.trim() && !result["Authorization"]) {
+            result["Authorization"] = `Bearer ${authConfig.bearerToken.trim()}`;
+        } else if (authType === "basic" && !result["Authorization"]) {
+            const { username, password } = authConfig.basicAuth;
+            if (username || password) {
+                result["Authorization"] = `Basic ${btoa(`${username}:${password}`)}`;
+            }
+        } else if (authType === "apikey") {
+            const { key, value, addTo } = authConfig.apiKey;
+            if (key.trim() && addTo === "header" && !result[key.trim()]) {
+                result[key.trim()] = value;
+            }
+        }
+        return result;
+    };
+
+    const parseQueryParams = (): Record<string, string> => {
+        const result = parseStringMap(queryParamsText, "Query Params");
+        if (authType === "apikey" && authConfig.apiKey.addTo === "query" && authConfig.apiKey.key.trim()) {
+            result[authConfig.apiKey.key.trim()] = authConfig.apiKey.value;
+        }
+        return result;
+    };
 
     const syncFramesNow = async () => {
         const nextFrames = await wsGetFrames();
@@ -2841,16 +2921,45 @@ function App() {
             return;
         }
         setUrl(item.url);
-        setHeadersText(item.headersText);
         setQueryParamsText(item.queryParamsText ?? "{}");
         setSubprotocol(item.subprotocol);
+        if (item.headersList) {
+            setHeadersList(item.headersList);
+        } else if (item.headersText) {
+            try {
+                const parsed = JSON.parse(item.headersText) as Record<string, unknown>;
+                setHeadersList(
+                    Object.entries(parsed).map(([k, v]) => ({ key: k, value: String(v), enabled: true }))
+                );
+            } catch {
+                setHeadersList([]);
+            }
+        } else {
+            setHeadersList([]);
+        }
+        setAuthType(item.authType ?? "none");
+        setAuthConfig(item.authConfig ?? { ...DEFAULT_AUTH_CONFIG });
         updateStatus(`loaded saved connection: ${item.name}`);
     };
 
     const handleSaveCurrentConnection = () => {
         const name = url.trim() || `connection-${savedConnections.length + 1}`;
+        const headersObj: Record<string, string> = {};
+        for (const h of headersList) {
+            if (h.enabled && h.key.trim()) headersObj[h.key.trim()] = h.value;
+        }
+        const serializedHeadersText = JSON.stringify(headersObj);
         const next = [
-            { name, url: url.trim(), headersText, queryParamsText, subprotocol: subprotocol.trim() },
+            {
+                name,
+                url: url.trim(),
+                headersList,
+                authType,
+                authConfig,
+                headersText: serializedHeadersText,
+                queryParamsText,
+                subprotocol: subprotocol.trim(),
+            },
             ...savedConnections.filter((item) => item.url !== url.trim() || item.subprotocol !== subprotocol.trim()),
         ].slice(0, 8);
         setSavedConnections(next);
@@ -3723,7 +3832,9 @@ function App() {
             >
                 <ConnectionPanel
                     url={url}
-                    headersText={headersText}
+                    headersList={headersList}
+                    authType={authType}
+                    authConfig={authConfig}
                     queryParamsText={queryParamsText}
                     subprotocol={subprotocol}
                     connected={connected}
@@ -3732,7 +3843,9 @@ function App() {
                     isCollapsed={connectionPanelCollapsed}
                     onToggleCollapsed={handleToggleConnectionPanel}
                     onUrlChange={setUrl}
-                    onHeadersChange={setHeadersText}
+                    onHeadersListChange={setHeadersList}
+                    onAuthTypeChange={setAuthType}
+                    onAuthConfigChange={setAuthConfig}
                     onQueryParamsChange={setQueryParamsText}
                     onSubprotocolChange={setSubprotocol}
                     onConnect={handleConnect}
