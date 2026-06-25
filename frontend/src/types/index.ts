@@ -90,3 +90,28 @@ export interface SessionSummary {
   extractedAudioBytes?: number;
   error: string;
 }
+
+/** Saved profile: a complete send configuration snapshot. */
+export interface SendProfile {
+  id: string;
+  name: string;
+  sessionProfile: SessionProfileType;
+  translationFromLanguage: string;
+  translationToLanguagesText: string;
+  sampleRate: number;
+  channels: number;
+  bitDepth: number;
+  frameMs: number;
+  seqStart: number;
+  headerRules: AudioHeaderFieldRule[];
+  textPayload: string;
+}
+
+/** Reusable template: a JSON snippet or header rule preset. */
+export interface SendTemplate {
+  id: string;
+  name: string;
+  type: "json" | "header";
+  /** For json type: the JSON string content. For header type: JSON-serialized AudioHeaderFieldRule[]. */
+  content: string;
+}
